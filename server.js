@@ -62,18 +62,6 @@ app.post('/webhook', express.json(), (req, res) => {
     return res.status(401).send('Senha incorreta');
   }
 
-  // Verificação do GitHub
-  const secret = process.env.GITHUB_SECRET;
-  const sig = req.headers['x-hub-signature-256'];
-
-  const crypto = require('crypto');
-  const hmac = crypto.createHmac('sha256', secret);
-  const digest = 'sha256=' + hmac.update(JSON.stringify(req.body)).digest('hex');
-
-  if (sig !== digest) {
-    return res.status(401).send('Invalid signature');
-  }
-
   // Rodar script de atualização
   const { exec } = require('child_process');
   exec('/home/ubuntu/servidor-de-arquivos/update.sh', (err, stdout, stderr) => {
