@@ -69,10 +69,10 @@ app.post('/webhook', express.json(), (req, res) => {
 
   // Rodar script de atualização
   const { exec } = require('child_process');
-  exec('/home/ubuntu/servidor-arquivos/seu-repositorio/update.sh', (err, stdout, stderr) => {
+  exec('/home/ubuntu/servidor-de-arquivos/update.sh', (err, stdout, stderr) => {
     if (err) {
       console.error(err);
-      return res.status(500).send('Erro ao atualizar');
+      return res.status(500).send('Erro ao atualizar: ' + stderr);
     }
     console.log(stdout);
     res.send('Atualização aplicada');
