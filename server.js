@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const http = require('http'); // Node 12 não precisa do 'https' para teste simples
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -56,10 +57,16 @@ app.get('/', function(req, res) {
 });
 
 app.post('/webhook', express.json(), (req, res) => {
-  // Verificar a senha simples
-  const senha = req.headers['x-webhook-pass']; // cliente envia no header
-  if (senha !== process.env.WEBHOOK_SECRET) {
-    return res.status(401).send('Senha incorreta');
+  const secret = process.env.WEBHOOK_SECRET;
+  const sig256 = req.headers['x-hub-signature-256'];
+
+  if (!sig256) return res.status(400).send('Missing signature');
+
+  const hmac = crypto.createHmac('sha256', secret);
+  const digest = 'sha256=' + hmac.update(JSON.stringify(req.body)).digest('hex');
+
+  if (sig256 !== digest) {
+    return res.status(401).send('Invalid signature');
   }
 
   // Rodar script de atualização
