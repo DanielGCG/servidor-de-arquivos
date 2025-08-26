@@ -35,13 +35,6 @@ const upload = multer({
   }
 });
 
-// Middleware de autenticação via API key
-function apiKeyMiddleware(req, res, next) {
-  const key = req.headers['x-api-key'];
-  if (key && key === process.env.API_KEY) next();
-  else res.status(401).json({ error: 'Unauthorized' });
-}
-
 // Endpoint para upload
 app.post('/upload', apiKeyMiddleware, upload.single('file'), function(req, res) {
   const fileUrl = req.protocol + '://' + req.get('host') + '/files/' + req.file.filename;
@@ -54,31 +47,6 @@ app.use('/files', express.static(uploadFolder));
 // Teste de API
 app.get('/', function(req, res) {
   res.send('Servidor funcionando!!!');
-});
-
-app.post('/webhook', express.json(), (req, res) => {
-  const secret = process.env.WEBHOOK_SECRET;
-  const sig256 = req.headers['x-hub-signature-256'];
-
-  if (!sig256) return res.status(400).send('Missing signature');
-
-  const hmac = crypto.createHmac('sha256', secret);
-  const digest = 'sha256=' + hmac.update(JSON.stringify(req.body)).digest('hex');
-
-  if (sig256 !== digest) {
-    return res.status(401).send('Invalid signature');
-  }
-
-  // Rodar script de atualização
-  const { exec } = require('child_process');
-  exec('/home/ubuntu/servidor-de-arquivos/update.sh', (err, stdout, stderr) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).send('Erro ao atualizar: ' + stderr);
-    }
-    console.log(stdout);
-    res.send('Atualização aplicada');
-  });
 });
 
 // Rodar servidor HTTP simples
