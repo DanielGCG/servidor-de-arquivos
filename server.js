@@ -52,7 +52,7 @@ app.use('/files', express.static(uploadFolder));
 
 // Teste de API
 app.get('/', function(req, res) {
-  res.send('Servidor de arquivos ativo com Node 12');
+  res.send('Servidor funcionando!');
 });
 
 app.post('/webhook', express.json(), (req, res) => {
