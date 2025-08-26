@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const http = require('http'); // Node 12 não precisa do 'https' para teste simples
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -53,6 +54,29 @@ app.use('/files', express.static(uploadFolder));
 // Teste de API
 app.get('/', function(req, res) {
   res.send('Servidor de arquivos ativo com Node 12');
+});
+
+app.post('/webhook', express.json(), (req, res) => {
+  const secret = process.env.GITHUB_SECRET; // configure no .env
+  const sig = req.headers['x-hub-signature-256'];
+
+  const hmac = crypto.createHmac('sha256', secret);
+  const digest = 'sha256=' + hmac.update(JSON.stringify(req.body)).digest('hex');
+
+  if (sig !== digest) {
+    return res.status(401).send('Invalid signature');
+  }
+
+  // Rodar script de atualização
+  const { exec } = require('child_process');
+  exec('/home/ubuntu/servidor-arquivos/seu-repositorio/update.sh', (err, stdout, stderr) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).send('Erro ao atualizar');
+    }
+    console.log(stdout);
+    res.send('Atualização aplicada');
+  });
 });
 
 // Rodar servidor HTTP simples
