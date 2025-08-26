@@ -5,7 +5,6 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const http = require('http'); // Node 12 não precisa do 'https' para teste simples
-const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -57,9 +56,17 @@ app.get('/', function(req, res) {
 });
 
 app.post('/webhook', express.json(), (req, res) => {
-  const secret = process.env.GITHUB_SECRET; // configure no .env
+  // Verificar a senha simples
+  const senha = req.headers['x-webhook-pass']; // cliente envia no header
+  if (senha !== process.env.WEBHOOK_SECRET) {
+    return res.status(401).send('Senha incorreta');
+  }
+
+  // Verificação do GitHub
+  const secret = process.env.GITHUB_SECRET;
   const sig = req.headers['x-hub-signature-256'];
 
+  const crypto = require('crypto');
   const hmac = crypto.createHmac('sha256', secret);
   const digest = 'sha256=' + hmac.update(JSON.stringify(req.body)).digest('hex');
 
