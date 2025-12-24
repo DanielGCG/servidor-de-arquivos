@@ -172,8 +172,17 @@
         if (!apiKey) return alert('Insira a API Key primeiro');
         if (fileInput.files.length === 0) return alert('Selecione um arquivo');
 
+        const file = fileInput.files[0];
+        const maxSize = 100 * 1024 * 1024; // 100MB
+        
+        if (file.size > maxSize) {
+            const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+            status.innerHTML = `<span style="color: red;">Erro: Arquivo muito grande (${sizeMB}MB). O limite é 100MB.</span>`;
+            return alert(`O arquivo é muito grande (${sizeMB}MB). O limite máximo permitido pela Cloudflare é 100MB.`);
+        }
+
         const formData = new FormData();
-        formData.append('file', fileInput.files[0]);
+        formData.append('file', file);
 
         status.innerText = 'Enviando...';
         try {

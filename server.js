@@ -10,8 +10,11 @@ const crypto = require('crypto');
 // Configuração de pastas
 const uploadFolder = path.join(__dirname, 'uploads');
 const storeFolder = path.join(uploadFolder, '.store');
+const tempFolder = path.join(__dirname, 'temp');
+
 if (!fs.existsSync(uploadFolder)) fs.mkdirSync(uploadFolder);
 if (!fs.existsSync(storeFolder)) fs.mkdirSync(storeFolder, { recursive: true });
+if (!fs.existsSync(tempFolder)) fs.mkdirSync(tempFolder, { recursive: true });
 
 // Arquivo para armazenar os hashes e evitar duplicatas
 const hashesFile = path.join(__dirname, 'hashes.json');
@@ -37,6 +40,34 @@ function calculateHash(filePath) {
     stream.on('end', () => resolve(hash.digest('hex')));
     stream.on('error', err => reject(err));
   });
+}
+
+// Função para sanitizar nomes de arquivos e pastas
+function sanitizeName(name, isFolder = false) {
+  if (!name) return '';
+  
+  // Se for pasta, preserva as barras mas limpa o resto
+  if (isFolder) {
+    return name
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9-_ /.]/g, '_')
+      .replace(/\.\./g, '')
+      .replace(/\/+/g, '/')
+      .trim();
+  }
+
+  const ext = path.extname(name);
+  const base = path.basename(name, ext);
+  
+  const sanitizedBase = base
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Remove acentos
+    .replace(/[^a-zA-Z0-9-_]/g, '_') // Apenas letras, números, - e _
+    .replace(/_{2,}/g, '_') // Remove __ duplicados
+    .substring(0, 120); // Limita tamanho do nome
+
+  return sanitizedBase + ext.toLowerCase();
 }
 
 // Funções para URLs com Tokens Fixos (Segurança sem expiração)
@@ -161,7 +192,8 @@ async function cleanupStore() {
   return { removed, kept };
 }
 
-indexExistingFiles();
+// Removido a chamada solta aqui para ser chamada dentro da função start()
+// indexExistingFiles();
 
 const app = express();
 app.set('trust proxy', 1);
@@ -169,24 +201,23 @@ app.use(cors());
 app.use(express.json());
 
 
-// Configuração do Multer para suportar subpastas
+// Configuração do Multer para usar uma pasta temporária isolada
 const storage = multer.diskStorage({
   destination: function(req, file, cb) {
-    let folder = req.query.folder || '';
-    // Sanitizar nome da pasta (permitindo subpastas com / e espaços)
-    folder = folder.replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '');
-    const dest = path.join(uploadFolder, folder);
-    if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-    cb(null, dest);
+    // Salva primeiro em uma pasta temp para evitar que o indexador automático
+    // "roube" o arquivo antes do processamento terminar
+    cb(null, tempFolder);
   },
   filename: function(req, file, cb) {
-    cb(null, Date.now() + '-' + file.originalname);
+    // Sanitiza o nome original do arquivo
+    const safeName = sanitizeName(file.originalname);
+    cb(null, Date.now() + '-' + safeName);
   }
 });
 
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 1024 * 1024 * 1024 }, // Aumentado para 1GB para vídeos grandes
+  limits: { fileSize: 100 * 1024 * 1024 }, // Limite de 100MB para compatibilidade com Cloudflare
   fileFilter: function(req, file, cb) {
     const allowedTypes = [
       'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
@@ -248,13 +279,17 @@ function apiKeyMiddleware(req, res, next) {
   res.status(401).json({ error: 'Não autorizado' });
 }
 
-
 // Endpoint para upload (protegido, suporta subpastas)
 app.post('/upload', apiKeyMiddleware, function(req, res) {
+  console.log(`[UPLOAD] Início da recepção do arquivo...`);
   upload.single('file')(req, res, async function(err) {
     if (err instanceof multer.MulterError) {
       console.error('[UPLOAD] Erro do Multer:', err);
-      return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+      let msg = err.message;
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        msg = 'Arquivo muito grande. O limite máximo permitido é de 100MB.';
+      }
+      return res.status(400).json({ error: msg });
     } else if (err) {
       console.error('[UPLOAD] Erro:', err);
       return res.status(400).json({ error: err.message });
@@ -265,7 +300,7 @@ app.post('/upload', apiKeyMiddleware, function(req, res) {
         return res.status(400).json({ error: 'Nenhum arquivo enviado' });
       }
 
-      const folder = req.query.folder ? req.query.folder.replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '') : '';
+      const folder = sanitizeName(req.query.folder, true);
       const tempFilePath = req.file.path;
       const mimetype = req.file.mimetype;
       const size = req.file.size;
@@ -275,7 +310,7 @@ app.post('/upload', apiKeyMiddleware, function(req, res) {
       let typeLabel = 'imagem/áudio';
 
       if (mimetype.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(req.file.originalname)) {
-        limit = 1024 * 1024 * 1024; // 1GB para vídeos
+        limit = 100 * 1024 * 1024; // 100MB para vídeos (Limite Cloudflare)
         typeLabel = 'vídeo';
       }
 
@@ -292,29 +327,33 @@ app.post('/upload', apiKeyMiddleware, function(req, res) {
       const relativePath = (folder ? folder + '/' : '') + req.file.filename;
       const targetPath = path.join(uploadFolder, relativePath);
 
-      // Garantir que a pasta de destino existe (já deve existir pelo Multer, mas por segurança)
+      // Garantir que a pasta de destino existe
       const destDir = path.dirname(targetPath);
       if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
 
       // 1. Garantir que temos o "Master" no .store
       if (!fs.existsSync(masterPath)) {
-        // Move o arquivo temporário para o store (primeira vez que vemos este conteúdo)
-        fs.renameSync(tempFilePath, masterPath);
+        // Move o arquivo da pasta temp para o store
+        try {
+          fs.renameSync(tempFilePath, masterPath);
+        } catch (renameErr) {
+          // Fallback para cópia se o rename falhar (ex: partições diferentes)
+          fs.copyFileSync(tempFilePath, masterPath);
+          if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+        }
       } else {
-        // Já temos esse conteúdo, deleta o temporário
+        // Já temos esse conteúdo, deleta o temporário da pasta temp
         if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
       }
 
-      // 2. Criar um Hard Link do Master para o local de destino do usuário
+      // 2. Criar um Hard Link do Master para o local de destino final
       try {
-        // Se o arquivo de destino já existir por algum motivo, removemos antes de linkar
         if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
         fs.linkSync(masterPath, targetPath);
-        console.log(`[UPLOAD] Link criado (Espaço economizado): ${relativePath}`);
+        console.log(`[UPLOAD] Link criado: ${relativePath}`);
       } catch (linkErr) {
-        // Se falhar (ex: partições diferentes), faz uma cópia normal
         fs.copyFileSync(masterPath, targetPath);
-        console.log(`[UPLOAD] Cópia realizada (Fallback): ${relativePath} - Erro: ${linkErr.message}`);
+        console.log(`[UPLOAD] Cópia realizada (Fallback): ${relativePath}`);
       }
 
       // Registrar no mapeamento
@@ -380,16 +419,41 @@ app.get('/list', apiKeyMiddleware, function(req, res) {
 });
 
 
-// Endpoint para remoção de arquivos (protegido, suporta subpastas) - recebe caminho via body JSON
+// Endpoint para remoção de arquivos (protegido, suporta subpastas) - recebe caminho ou URL via body JSON
 app.delete('/delete', apiKeyMiddleware, function(req, res) {
-  const relPath = req.body.filepath || '';
-  if (!relPath) {
-    console.log('[DELETE] Falha: filepath não informado no corpo da requisição');
-    return res.status(400).json({ error: 'filepath obrigatório no corpo da requisição' });
+  let relPath = req.body.filepath || '';
+  const urlStr = req.body.url || '';
+
+  // Se uma URL for fornecida, extrair o caminho relativo do arquivo
+  if (urlStr) {
+    try {
+      // Tenta tratar como URL completa ou apenas o caminho
+      const urlObj = urlStr.startsWith('http') ? new URL(urlStr) : { pathname: urlStr };
+      let pathname = decodeURIComponent(urlObj.pathname);
+      
+      // Remove o prefixo /files/ se existir
+      if (pathname.includes('/files/')) {
+        relPath = pathname.split('/files/')[1];
+      } else {
+        relPath = pathname.startsWith('/') ? pathname.substring(1) : pathname;
+      }
+      
+      // Remove query strings (como ?token=...) se ainda existirem
+      relPath = relPath.split('?')[0];
+    } catch (e) {
+      console.error('[DELETE] Erro ao processar URL:', e.message);
+    }
   }
-  // Sanitizar cada parte do caminho (permitindo espaços, que são comuns em nomes de arquivos)
-  const safePath = relPath.split('/').map(p => p.replace(/[^a-zA-Z0-9-_ .]/g, '')).join(path.sep);
+
+  if (!relPath) {
+    console.log('[DELETE] Falha: filepath ou url não informados');
+    return res.status(400).json({ error: 'filepath ou url obrigatório no corpo da requisição' });
+  }
+
+  // Sanitizar o caminho para evitar Directory Traversal e nomes bugados
+  const safePath = sanitizeName(relPath, true).split('/').join(path.sep);
   const filePath = path.join(uploadFolder, safePath);
+  
   fs.access(filePath, fs.constants.F_OK, (err) => {
     if (err) {
       console.log(`[DELETE] Arquivo não encontrado: ${filePath}`);
@@ -435,8 +499,22 @@ app.get('/', function(req, res) {
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
-// Rodar servidor HTTP simples
+// Rodar servidor HTTP
 const PORT = process.env.PORT || 3000;
-http.createServer(app).listen(PORT, '0.0.0.0', function() {
-  console.log('Servidor rodando na porta ' + PORT);
-});
+const server = http.createServer(app);
+
+// Aumentar timeouts para suportar uploads grandes e lentos
+server.timeout = 600000; // 10 minutos
+server.keepAliveTimeout = 61000; // Um pouco mais que o padrão de proxies (60s)
+server.headersTimeout = 62000;
+
+async function start() {
+  // Aguarda a indexação inicial antes de abrir o servidor
+  await indexExistingFiles();
+  
+  server.listen(PORT, '0.0.0.0', function() {
+    console.log('Servidor rodando na porta ' + PORT);
+  });
+}
+
+start();
