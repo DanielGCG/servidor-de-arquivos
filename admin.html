@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerenciador de Arquivos</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f4f4f9; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; }
+        .auth-section, .upload-section { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        input[type="text"], input[type="password"], input[type="file"] { padding: 8px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+        button { padding: 10px 15px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #0056b3; }
+        button.delete { background: #dc3545; }
+        button.delete:hover { background: #a71d2a; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #ddd; }
+        tr:hover { background: #f1f1f1; }
+        .preview { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; }
+        .preview-media { max-width: 100px; max-height: 60px; border-radius: 4px; }
+        .status { margin-top: 10px; font-weight: bold; }
+        .badge { padding: 4px 8px; border-radius: 12px; font-size: 0.8em; color: white; }
+        .badge-green { background: #28a745; }
+        .badge-blue { background: #007bff; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Gerenciador de Arquivos</h1>
+
+    <div class="auth-section">
+        <label><strong>Chave da API (Obrigatória):</strong></label>
+        <input type="password" id="apiKey" placeholder="Insira sua API Key aqui..." oninput="saveKey()">
+        <div style="margin-top: 5px;">
+            <small>A chave será salva no seu navegador para facilitar o uso.</small>
+        </div>
+        <button onclick="loadFiles()" style="margin-top: 10px; background: #28a745;">Listar / Atualizar Arquivos</button>
+    </div>
+
+    <div class="upload-section">
+        <h3>Upload de Arquivo</h3>
+        <p><small>Utiliza a chave configurada acima.</small></p>
+        <input type="file" id="fileInput">
+        <input type="text" id="folderInput" placeholder="Pasta (opcional, ex: imagens)">
+        <button onclick="uploadFile()">Fazer Upload</button>
+        <div id="uploadStatus" class="status"></div>
+    </div>
+
+    <table id="fileTable">
+        <thead>
+            <tr>
+                <th>Preview</th>
+                <th>Nome/Caminho</th>
+                <th>Tamanho</th>
+                <th>Status</th>
+                <th>Ações</th>
+            </tr>
+        </thead>
+        <tbody id="fileList">
+            <!-- Arquivos serão inseridos aqui -->
+        </tbody>
+    </table>
+</div>
+
+<script>
+    // Carregar chave salva ao abrir a página
+    window.onload = () => {
+        const savedKey = localStorage.getItem('server_api_key');
+        if (savedKey) {
+            document.getElementById('apiKey').value = savedKey;
+            loadFiles(); // Tenta carregar os arquivos automaticamente se houver chave
+        }
+    };
+
+    function saveKey() {
+        const key = document.getElementById('apiKey').value;
+        localStorage.setItem('server_api_key', key);
+    }
+
+    async function loadFiles() {
+        const apiKey = document.getElementById('apiKey').value;
+        if (!apiKey) return alert('Por favor, insira a API Key');
+
+        try {
+            const response = await fetch('/list', {
+                headers: { 'x-api-key': apiKey }
+            });
+
+            if (!response.ok) throw new Error('Falha ao carregar arquivos. Verifique a chave.');
+
+            const files = await response.json();
+            const listElement = document.getElementById('fileList');
+            listElement.innerHTML = '';
+
+            // Contar ocorrências de cada inode para identificar duplicatas
+            const inoCounts = {};
+            files.forEach(f => inoCounts[f.ino] = (inoCounts[f.ino] || 0) + 1);
+
+            files.forEach(file => {
+                const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(file.name);
+                const isVideo = /\.(mp4|mov|webm|m4v)$/i.test(file.name);
+                const isAudio = /\.(mp3|wav|ogg)$/i.test(file.name);
+                
+                let previewHtml = '---';
+                if (isImage) {
+                    previewHtml = `<img src="${file.url}" class="preview">`;
+                } else if (isVideo) {
+                    previewHtml = `<video src="${file.url}" class="preview-media" muted></video>`;
+                } else if (isAudio) {
+                    previewHtml = `<audio src="${file.url}" style="width: 100px" controls></audio>`;
+                }
+
+                const isDuplicate = inoCounts[file.ino] > 1;
+                const statusHtml = isDuplicate 
+                    ? '<span class="badge badge-green">Deduplicado (Link)</span>' 
+                    : '<span class="badge badge-blue">Único</span>';
+
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${previewHtml}</td>
+                    <td><a href="${file.url}" target="_blank">${file.path}</a></td>
+                    <td>${(file.size / 1024).toFixed(2)} KB</td>
+                    <td>${statusHtml}</td>
+                    <td>
+                        <button class="delete" onclick="deleteFile('${file.path}')">Remover</button>
+                    </td>
+                `;
+                listElement.appendChild(row);
+            });
+        } catch (err) {
+            alert(err.message);
+        }
+    }
+
+    async function uploadFile() {
+        const apiKey = document.getElementById('apiKey').value;
+        const fileInput = document.getElementById('fileInput');
+        const folderInput = document.getElementById('folderInput').value;
+        const status = document.getElementById('uploadStatus');
+
+        if (!apiKey) return alert('Insira a API Key primeiro');
+        if (fileInput.files.length === 0) return alert('Selecione um arquivo');
+
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+
+        status.innerText = 'Enviando...';
+        try {
+            const response = await fetch(`/upload?folder=${folderInput}`, {
+                method: 'POST',
+                headers: { 'x-api-key': apiKey },
+                body: formData
+            });
+
+            const result = await response.json();
+            if (response.ok) {
+                status.innerText = 'Upload concluído!';
+                loadFiles();
+            } else {
+                status.innerText = 'Erro: ' + result.error;
+            }
+        } catch (err) {
+            status.innerText = 'Erro na conexão';
+        }
+    }
+
+    async function deleteFile(filepath) {
+        if (!confirm(`Tem certeza que deseja remover ${filepath}?`)) return;
+
+        const apiKey = document.getElementById('apiKey').value;
+        try {
+            const response = await fetch('/delete', {
+                method: 'DELETE',
+                headers: { 
+                    'x-api-key': apiKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ filepath })
+            });
+
+            if (response.ok) {
+                alert('Arquivo removido');
+                loadFiles();
+            } else {
+                const result = await response.json();
+                alert('Erro: ' + result.error);
+            }
+        } catch (err) {
+            alert('Erro na conexão');
+        }
+    }
+</script>
+
+</body>
+</html>

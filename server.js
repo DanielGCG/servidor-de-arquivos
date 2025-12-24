@@ -7,14 +7,95 @@ const cors = require('cors');
 const http = require('http');
 const crypto = require('crypto');
 
+// Configuração de pastas
+const uploadFolder = path.join(__dirname, 'uploads');
+const storeFolder = path.join(uploadFolder, '.store');
+if (!fs.existsSync(uploadFolder)) fs.mkdirSync(uploadFolder);
+if (!fs.existsSync(storeFolder)) fs.mkdirSync(storeFolder, { recursive: true });
+
+// Arquivo para armazenar os hashes e evitar duplicatas
+const hashesFile = path.join(__dirname, 'hashes.json');
+let fileHashes = {};
+
+if (fs.existsSync(hashesFile)) {
+  try {
+    fileHashes = JSON.parse(fs.readFileSync(hashesFile, 'utf8'));
+  } catch (e) {
+    fileHashes = {};
+  }
+}
+
+function saveHashes() {
+  fs.writeFileSync(hashesFile, JSON.stringify(fileHashes, null, 2));
+}
+
+function calculateHash(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', data => hash.update(data));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', err => reject(err));
+  });
+}
+
+// Função para indexar arquivos existentes (roda no início)
+async function indexExistingFiles() {
+  const getAllFiles = (dirPath, arrayOfFiles) => {
+    if (!fs.existsSync(dirPath)) return arrayOfFiles || [];
+    const files = fs.readdirSync(dirPath);
+    arrayOfFiles = arrayOfFiles || [];
+    files.forEach(function(file) {
+      if (file === '.store') return;
+      const fullPath = path.join(dirPath, file);
+      if (fs.statSync(fullPath).isDirectory()) {
+        arrayOfFiles = getAllFiles(fullPath, arrayOfFiles);
+      } else {
+        arrayOfFiles.push(fullPath);
+      }
+    });
+    return arrayOfFiles;
+  };
+
+  const allFiles = getAllFiles(uploadFolder);
+  console.log(`[INDEX] Verificando ${allFiles.length} arquivos existentes...`);
+  
+  for (const filePath of allFiles) {
+    try {
+      const hash = await calculateHash(filePath);
+      const masterPath = path.join(storeFolder, hash);
+
+      if (!fs.existsSync(masterPath)) {
+        // Primeiro arquivo com este hash vira o master
+        fs.renameSync(filePath, masterPath);
+        fs.linkSync(masterPath, filePath);
+      } else {
+        // Se já existe um master, mas este arquivo não é um link para ele
+        const stat = fs.statSync(filePath);
+        const masterStat = fs.statSync(masterPath);
+        
+        if (stat.ino !== masterStat.ino) {
+          // São arquivos diferentes com mesmo conteúdo, unificar!
+          fs.unlinkSync(filePath);
+          fs.linkSync(masterPath, filePath);
+          console.log(`[INDEX] Unificado: ${filePath}`);
+        }
+      }
+      fileHashes[hash] = masterPath;
+    } catch (e) {
+      console.error(`[INDEX] Erro ao processar ${filePath}:`, e);
+    }
+  }
+  saveHashes();
+  console.log(`[INDEX] Indexação concluída.`);
+}
+
+indexExistingFiles();
+
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
-
-// Criar pasta de uploads se não existir
-const uploadFolder = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadFolder)) fs.mkdirSync(uploadFolder);
 
 
 // Configuração do Multer para suportar subpastas
@@ -34,20 +115,27 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 500 * 1024 * 1024 }, // Limite máximo global (500MB para vídeos)
   fileFilter: function(req, file, cb) {
-    const allowed = ['image/jpeg', 'image/png', 'image/gif'];
-    if (allowed.includes(file.mimetype)) cb(null, true);
-    else cb(new Error('Tipo de arquivo não permitido'));
+    const allowedTypes = [
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v',
+      'audio/mpeg', 'audio/mp3', 'audio/wav'
+    ];
+    
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      console.log(`[UPLOAD] Bloqueado: Mimetype "${file.mimetype}" não permitido para o arquivo "${file.originalname}"`);
+      cb(new Error('Tipo de arquivo não permitido: ' + file.mimetype));
+    }
   }
 });
-
 
 // Middleware de autenticação por API key
 function apiKeyMiddleware(req, res, next) {
   const apiKey = req.headers['x-api-key'];
   if (apiKey && apiKey === process.env.API_KEY) {
-    console.log(`[API] Autenticado: ${apiKey}`);
     next();
   } else {
     console.log(`[API] Falha na autenticação. Recebido: ${apiKey}`);
@@ -57,11 +145,117 @@ function apiKeyMiddleware(req, res, next) {
 
 
 // Endpoint para upload (protegido, suporta subpastas)
-app.post('/upload', apiKeyMiddleware, upload.single('file'), function(req, res) {
-  const folder = req.query.folder ? req.query.folder.replace(/[^a-zA-Z0-9-_]/g, '') : '';
-  const fileUrl = req.protocol + '://' + req.get('host') + '/files/' + (folder ? folder + '/' : '') + req.file.filename;
-  console.log(`[UPLOAD] Arquivo recebido: ${req.file.originalname} -> ${req.file.filename} (pasta: ${folder})`);
-  res.json({ message: 'Upload bem-sucedido', url: fileUrl, filename: req.file.filename, folder });
+app.post('/upload', apiKeyMiddleware, upload.single('file'), async function(req, res) {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+    }
+
+    const folder = req.query.folder ? req.query.folder.replace(/[^a-zA-Z0-9-_]/g, '') : '';
+    const tempFilePath = req.file.path;
+    const mimetype = req.file.mimetype;
+    const size = req.file.size;
+
+    // Definir limites específicos por tipo
+    let limit = 25 * 1024 * 1024; // 25MB para imagens, gifs e músicas
+    let typeLabel = 'imagem/áudio';
+
+    if (mimetype.startsWith('video/')) {
+      limit = 500 * 1024 * 1024; // 500MB para vídeos
+      typeLabel = 'vídeo';
+    }
+
+    if (size > limit) {
+      fs.unlinkSync(tempFilePath); // Remove o arquivo que excedeu o limite específico
+      return res.status(400).json({ 
+        error: `Arquivo muito grande para o tipo ${typeLabel}. Limite: ${limit / (1024 * 1024)}MB` 
+      });
+    }
+
+    const fileHash = await calculateHash(tempFilePath);
+    
+    const masterPath = path.join(storeFolder, fileHash);
+    const relativePath = (folder ? folder + '/' : '') + req.file.filename;
+    const targetPath = path.join(uploadFolder, relativePath);
+
+    // Garantir que a pasta de destino existe
+    const destDir = path.dirname(targetPath);
+    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+
+    // 1. Garantir que temos o "Master" no .store
+    if (!fs.existsSync(masterPath)) {
+      // Move o arquivo temporário para o store (primeira vez que vemos este conteúdo)
+      fs.renameSync(tempFilePath, masterPath);
+    } else {
+      // Já temos esse conteúdo, deleta o temporário
+      fs.unlinkSync(tempFilePath);
+    }
+
+    // 2. Criar um Hard Link do Master para o local de destino do usuário
+    // Isso cria um "ponteiro" real no sistema de arquivos que não ocupa espaço extra
+    try {
+      fs.linkSync(masterPath, targetPath);
+      console.log(`[UPLOAD] Link criado (Espaço economizado): ${relativePath}`);
+    } catch (linkErr) {
+      // Se falhar (ex: partições diferentes), faz uma cópia normal
+      fs.copyFileSync(masterPath, targetPath);
+      console.log(`[UPLOAD] Cópia realizada (Partições diferentes): ${relativePath}`);
+    }
+
+    // Registrar no mapeamento (opcional, mas útil para busca rápida)
+    fileHashes[fileHash] = masterPath; 
+    saveHashes();
+
+    const fileUrl = req.protocol + '://' + req.get('host') + '/files/' + relativePath.replace(/\\/g, '/');
+    console.log(`[UPLOAD] Arquivo processado: ${req.file.originalname} -> ${relativePath} (Hash: ${fileHash})`);
+    res.json({ 
+      message: 'Upload bem-sucedido', 
+      url: fileUrl, 
+      filename: req.file.filename, 
+      folder, 
+      duplicate: fs.existsSync(masterPath) 
+    });
+  } catch (err) {
+    console.error('[UPLOAD] Erro:', err);
+    res.status(500).json({ error: 'Erro ao processar upload' });
+  }
+});
+
+
+// Endpoint para listar arquivos (protegido)
+app.get('/list', apiKeyMiddleware, function(req, res) {
+  const getAllFiles = (dirPath, arrayOfFiles) => {
+    const files = fs.readdirSync(dirPath);
+    arrayOfFiles = arrayOfFiles || [];
+    files.forEach(function(file) {
+      // Ignorar a pasta interna de armazenamento (.store)
+      if (file === '.store') return;
+
+      const fullPath = path.join(dirPath, file);
+      if (fs.statSync(fullPath).isDirectory()) {
+        arrayOfFiles = getAllFiles(fullPath, arrayOfFiles);
+      } else {
+        const stats = fs.statSync(fullPath);
+        const relativePath = path.relative(uploadFolder, fullPath).replace(/\\/g, '/');
+        arrayOfFiles.push({
+          name: file,
+          path: relativePath,
+          url: req.protocol + '://' + req.get('host') + '/files/' + relativePath,
+          size: stats.size,
+          mtime: stats.mtime,
+          ino: stats.ino // Adicionado para identificar Hard Links
+        });
+      }
+    });
+    return arrayOfFiles;
+  };
+
+  try {
+    const fileList = getAllFiles(uploadFolder);
+    res.json(fileList);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao listar arquivos' });
+  }
 });
 
 
@@ -72,8 +266,8 @@ app.delete('/delete', apiKeyMiddleware, function(req, res) {
     console.log('[DELETE] Falha: filepath não informado no corpo da requisição');
     return res.status(400).json({ error: 'filepath obrigatório no corpo da requisição' });
   }
-  // Sanitizar cada parte do caminho
-  const safePath = relPath.split('/').map(p => p.replace(/[^a-zA-Z0-9-_.]/g, '')).join(path.sep);
+  // Sanitizar cada parte do caminho (permitindo espaços, que são comuns em nomes de arquivos)
+  const safePath = relPath.split('/').map(p => p.replace(/[^a-zA-Z0-9-_ .]/g, '')).join(path.sep);
   const filePath = path.join(uploadFolder, safePath);
   fs.access(filePath, fs.constants.F_OK, (err) => {
     if (err) {
@@ -85,6 +279,7 @@ app.delete('/delete', apiKeyMiddleware, function(req, res) {
         console.log(`[DELETE] Erro ao remover: ${filePath}`);
         return res.status(500).json({ error: 'Erro ao remover arquivo' });
       }
+      
       console.log(`[DELETE] Removido: ${filePath}`);
       res.json({ message: 'Arquivo removido com sucesso' });
     });
@@ -97,7 +292,7 @@ app.use('/files', express.static(uploadFolder));
 
 // Teste de API
 app.get('/', function(req, res) {
-  res.send('Servidor funcionando!!!');
+  res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
 // Rodar servidor HTTP simples
