@@ -4,10 +4,11 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
-const http = require('http'); // Node 12 não precisa do 'https' para teste simples
+const http = require('http');
 const crypto = require('crypto');
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 
