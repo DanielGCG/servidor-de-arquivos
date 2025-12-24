@@ -103,13 +103,15 @@
                 const isVideo = /\.(mp4|mov|webm|m4v)$/i.test(file.name);
                 const isAudio = /\.(mp3|wav|ogg)$/i.test(file.name);
                 
+                const authenticatedUrl = file.url;
+                
                 let previewHtml = '---';
                 if (isImage) {
-                    previewHtml = `<img src="${file.url}" class="preview">`;
+                    previewHtml = `<img src="${authenticatedUrl}" class="preview">`;
                 } else if (isVideo) {
-                    previewHtml = `<video src="${file.url}" class="preview-media" muted></video>`;
+                    previewHtml = `<video src="${authenticatedUrl}" class="preview-media" muted></video>`;
                 } else if (isAudio) {
-                    previewHtml = `<audio src="${file.url}" style="width: 100px" controls></audio>`;
+                    previewHtml = `<audio src="${authenticatedUrl}" style="width: 100px" controls></audio>`;
                 }
 
                 const isDuplicate = inoCounts[file.ino] > 1;
@@ -120,7 +122,7 @@
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td>${previewHtml}</td>
-                    <td><a href="${file.url}" target="_blank">${file.path}</a></td>
+                    <td><a href="${authenticatedUrl}" target="_blank">${file.path}</a></td>
                     <td>${(file.size / 1024).toFixed(2)} KB</td>
                     <td>${statusHtml}</td>
                     <td>

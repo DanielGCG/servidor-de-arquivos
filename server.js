@@ -39,6 +39,23 @@ function calculateHash(filePath) {
   });
 }
 
+// Funções para URLs com Tokens Fixos (Segurança sem expiração)
+function generatePermanentToken(relativePath) {
+  // Gera um hash único para o arquivo usando a API_KEY como segredo
+  // Isso torna a URL fixa, mas impossível de prever sem a chave
+  return crypto
+    .createHmac('sha256', process.env.API_KEY)
+    .update(relativePath)
+    .digest('hex')
+    .substring(0, 16); // 16 caracteres são suficientes para segurança e mantêm a URL curta
+}
+
+function verifyPermanentToken(relativePath, token) {
+  if (!token) return false;
+  const expectedToken = generatePermanentToken(relativePath);
+  return token === expectedToken;
+}
+
 // Função para indexar arquivos existentes (roda no início)
 async function indexExistingFiles() {
   const getAllFiles = (dirPath, arrayOfFiles) => {
@@ -132,15 +149,45 @@ const upload = multer({
   }
 });
 
-// Middleware de autenticação por API key
+// Middleware de autenticação por API key (aceita via Header ou Token na URL)
 function apiKeyMiddleware(req, res, next) {
-  const apiKey = req.headers['x-api-key'];
+  const apiKey = req.headers['x-api-key'] || req.query.key;
+  
+  // 1. Verificar se é a chave mestra (para upload, delete, list e acesso total)
   if (apiKey && apiKey === process.env.API_KEY) {
-    next();
-  } else {
-    console.log(`[API] Falha na autenticação. Recebido: ${apiKey}`);
-    res.status(401).json({ error: 'Não autorizado' });
+    return next();
   }
+
+  // 2. Verificar se é um Token Fixo (para visualização de arquivos)
+  // Se o middleware for usado via app.use('/files', ...), o req.path é relativo à raiz de uploads
+  // Se for usado em rotas como /list ou /delete, o req.path é /list ou /delete
+  let relativePath = req.path;
+  
+  // Se o caminho começar com /files/, removemos para obter o caminho do arquivo
+  if (relativePath.startsWith('/files/')) {
+    relativePath = relativePath.replace('/files/', '');
+  } 
+  // Remove a barra inicial se existir
+  if (relativePath.startsWith('/')) {
+    relativePath = relativePath.substring(1);
+  }
+
+  const { token } = req.query;
+  if (token && verifyPermanentToken(decodeURIComponent(relativePath), token)) {
+    return next();
+  }
+
+  // Log detalhado para debug (ajuda a identificar por que falhou)
+  console.log(`[AUTH] Negado: ${req.method} ${req.originalUrl}`);
+  if (!apiKey && !token) {
+    console.log(`  -> Motivo: Nenhuma credencial fornecida (Header x-api-key ou ?token= ausentes)`);
+  } else if (apiKey && apiKey !== process.env.API_KEY) {
+    console.log(`  -> Motivo: API Key inválida`);
+  } else if (token) {
+    console.log(`  -> Motivo: Token inválido para o caminho: ${relativePath}`);
+  }
+
+  res.status(401).json({ error: 'Não autorizado' });
 }
 
 
@@ -206,7 +253,9 @@ app.post('/upload', apiKeyMiddleware, upload.single('file'), async function(req,
     fileHashes[fileHash] = masterPath; 
     saveHashes();
 
-    const fileUrl = req.protocol + '://' + req.get('host') + '/files/' + relativePath.replace(/\\/g, '/');
+    const token = generatePermanentToken(relativePath);
+    const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
+    
     console.log(`[UPLOAD] Arquivo processado: ${req.file.originalname} -> ${relativePath} (Hash: ${fileHash})`);
     res.json({ 
       message: 'Upload bem-sucedido', 
@@ -237,10 +286,13 @@ app.get('/list', apiKeyMiddleware, function(req, res) {
       } else {
         const stats = fs.statSync(fullPath);
         const relativePath = path.relative(uploadFolder, fullPath).replace(/\\/g, '/');
+        const token = generatePermanentToken(relativePath);
+        const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath}?token=${token}`;
+        
         arrayOfFiles.push({
           name: file,
           path: relativePath,
-          url: req.protocol + '://' + req.get('host') + '/files/' + relativePath,
+          url: fileUrl,
           size: stats.size,
           mtime: stats.mtime,
           ino: stats.ino // Adicionado para identificar Hard Links
@@ -287,8 +339,8 @@ app.delete('/delete', apiKeyMiddleware, function(req, res) {
 });
 
 
-// Servir arquivos da pasta uploads e subpastas
-app.use('/files', express.static(uploadFolder));
+// Servir arquivos da pasta uploads e subpastas (protegido por API Key)
+app.use('/files', apiKeyMiddleware, express.static(uploadFolder));
 
 // Teste de API
 app.get('/', function(req, res) {
