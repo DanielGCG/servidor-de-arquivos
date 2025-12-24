@@ -44,10 +44,10 @@ function generatePermanentToken(relativePath) {
   // Gera um hash único para o arquivo usando a API_KEY como segredo
   // Isso torna a URL fixa, mas impossível de prever sem a chave
   return crypto
-    .createHmac('sha256', process.env.API_KEY)
+    .createHmac('sha256', process.env.API_KEY || 'default_secret')
     .update(relativePath)
     .digest('hex')
-    .substring(0, 16); // 16 caracteres são suficientes para segurança e mantêm a URL curta
+    .substring(0, 16);
 }
 
 function verifyPermanentToken(relativePath, token) {
@@ -65,10 +65,14 @@ async function indexExistingFiles() {
     files.forEach(function(file) {
       if (file === '.store') return;
       const fullPath = path.join(dirPath, file);
-      if (fs.statSync(fullPath).isDirectory()) {
-        arrayOfFiles = getAllFiles(fullPath, arrayOfFiles);
-      } else {
-        arrayOfFiles.push(fullPath);
+      try {
+        if (fs.statSync(fullPath).isDirectory()) {
+          arrayOfFiles = getAllFiles(fullPath, arrayOfFiles);
+        } else {
+          arrayOfFiles.push(fullPath);
+        }
+      } catch (e) {
+        console.error(`[INDEX] Erro ao acessar ${fullPath}:`, e.message);
       }
     });
     return arrayOfFiles;
@@ -77,6 +81,7 @@ async function indexExistingFiles() {
   const allFiles = getAllFiles(uploadFolder);
   console.log(`[INDEX] Verificando ${allFiles.length} arquivos existentes...`);
   
+  let processed = 0;
   for (const filePath of allFiles) {
     try {
       const hash = await calculateHash(filePath);
@@ -85,7 +90,11 @@ async function indexExistingFiles() {
       if (!fs.existsSync(masterPath)) {
         // Primeiro arquivo com este hash vira o master
         fs.renameSync(filePath, masterPath);
-        fs.linkSync(masterPath, filePath);
+        try {
+          fs.linkSync(masterPath, filePath);
+        } catch (e) {
+          fs.copyFileSync(masterPath, filePath);
+        }
       } else {
         // Se já existe um master, mas este arquivo não é um link para ele
         const stat = fs.statSync(filePath);
@@ -93,18 +102,63 @@ async function indexExistingFiles() {
         
         if (stat.ino !== masterStat.ino) {
           // São arquivos diferentes com mesmo conteúdo, unificar!
-          fs.unlinkSync(filePath);
-          fs.linkSync(masterPath, filePath);
-          console.log(`[INDEX] Unificado: ${filePath}`);
+          try {
+            // Tenta criar o link primeiro em um local temporário para garantir que funciona
+            const tempLinkPath = filePath + '.tmp';
+            fs.linkSync(masterPath, tempLinkPath);
+            // Se funcionou, substitui o original
+            fs.unlinkSync(filePath);
+            fs.renameSync(tempLinkPath, filePath);
+            console.log(`[INDEX] Unificado (Hard Link): ${filePath}`);
+          } catch (linkErr) {
+            // Se falhar o hard link, não fazemos nada (mantemos as cópias separadas para não perder dados)
+            console.log(`[INDEX] Falha ao unificar ${filePath}: ${linkErr.message}`);
+          }
         }
       }
       fileHashes[hash] = masterPath;
+      processed++;
+      if (processed % 10 === 0) console.log(`[INDEX] Progresso: ${processed}/${allFiles.length}`);
     } catch (e) {
       console.error(`[INDEX] Erro ao processar ${filePath}:`, e);
     }
   }
   saveHashes();
-  console.log(`[INDEX] Indexação concluída.`);
+  console.log(`[INDEX] Indexação concluída. ${processed} arquivos processados.`);
+  return { total: allFiles.length, processed };
+}
+
+// Função para remover arquivos do .store que não possuem mais links
+async function cleanupStore() {
+  console.log('[CLEANUP] Iniciando limpeza do .store...');
+  const files = fs.readdirSync(storeFolder);
+  let removed = 0;
+  let kept = 0;
+
+  for (const file of files) {
+    const fullPath = path.join(storeFolder, file);
+    try {
+      const stats = fs.statSync(fullPath);
+      // Se nlink for 1, significa que apenas a entrada no .store existe
+      if (stats.nlink === 1) {
+        fs.unlinkSync(fullPath);
+        // Remover do mapeamento de hashes se existir
+        for (const hash in fileHashes) {
+          if (fileHashes[hash] === fullPath) {
+            delete fileHashes[hash];
+          }
+        }
+        removed++;
+      } else {
+        kept++;
+      }
+    } catch (e) {
+      console.error(`[CLEANUP] Erro ao processar ${file}:`, e.message);
+    }
+  }
+  saveHashes();
+  console.log(`[CLEANUP] Concluído. Removidos: ${removed}, Mantidos: ${kept}`);
+  return { removed, kept };
 }
 
 indexExistingFiles();
@@ -119,8 +173,8 @@ app.use(express.json());
 const storage = multer.diskStorage({
   destination: function(req, file, cb) {
     let folder = req.query.folder || '';
-    // Sanitizar nome da pasta
-    folder = folder.replace(/[^a-zA-Z0-9-_]/g, '');
+    // Sanitizar nome da pasta (permitindo subpastas com / e espaços)
+    folder = folder.replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '');
     const dest = path.join(uploadFolder, folder);
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
     cb(null, dest);
@@ -132,18 +186,22 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 500 * 1024 * 1024 }, // Limite máximo global (500MB para vídeos)
+  limits: { fileSize: 1024 * 1024 * 1024 }, // Aumentado para 1GB para vídeos grandes
   fileFilter: function(req, file, cb) {
     const allowedTypes = [
-      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-      'video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v',
-      'audio/mpeg', 'audio/mp3', 'audio/wav'
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+      'video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v', 'video/x-matroska', 'video/avi', 'video/mpeg', 'video/x-msvideo',
+      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/ogg', 'audio/aac',
+      'application/octet-stream' // Permitir genérico para vídeos/áudios não identificados
     ];
     
-    if (allowedTypes.includes(file.mimetype)) {
+    const isAllowedMime = allowedTypes.includes(file.mimetype);
+    const isAllowedExt = /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg|mp3|wav|ogg|aac|jpg|jpeg|png|gif|webp|svg)$/i.test(file.originalname);
+
+    if (isAllowedMime || isAllowedExt) {
       cb(null, true);
     } else {
-      console.log(`[UPLOAD] Bloqueado: Mimetype "${file.mimetype}" não permitido para o arquivo "${file.originalname}"`);
+      console.log(`[UPLOAD] Bloqueado: Mimetype "${file.mimetype}" ou Extensão não permitida para "${file.originalname}"`);
       cb(new Error('Tipo de arquivo não permitido: ' + file.mimetype));
     }
   }
@@ -192,82 +250,93 @@ function apiKeyMiddleware(req, res, next) {
 
 
 // Endpoint para upload (protegido, suporta subpastas)
-app.post('/upload', apiKeyMiddleware, upload.single('file'), async function(req, res) {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+app.post('/upload', apiKeyMiddleware, function(req, res) {
+  upload.single('file')(req, res, async function(err) {
+    if (err instanceof multer.MulterError) {
+      console.error('[UPLOAD] Erro do Multer:', err);
+      return res.status(400).json({ error: `Erro no upload: ${err.message}` });
+    } else if (err) {
+      console.error('[UPLOAD] Erro:', err);
+      return res.status(400).json({ error: err.message });
     }
 
-    const folder = req.query.folder ? req.query.folder.replace(/[^a-zA-Z0-9-_]/g, '') : '';
-    const tempFilePath = req.file.path;
-    const mimetype = req.file.mimetype;
-    const size = req.file.size;
-
-    // Definir limites específicos por tipo
-    let limit = 25 * 1024 * 1024; // 25MB para imagens, gifs e músicas
-    let typeLabel = 'imagem/áudio';
-
-    if (mimetype.startsWith('video/')) {
-      limit = 500 * 1024 * 1024; // 500MB para vídeos
-      typeLabel = 'vídeo';
-    }
-
-    if (size > limit) {
-      fs.unlinkSync(tempFilePath); // Remove o arquivo que excedeu o limite específico
-      return res.status(400).json({ 
-        error: `Arquivo muito grande para o tipo ${typeLabel}. Limite: ${limit / (1024 * 1024)}MB` 
-      });
-    }
-
-    const fileHash = await calculateHash(tempFilePath);
-    
-    const masterPath = path.join(storeFolder, fileHash);
-    const relativePath = (folder ? folder + '/' : '') + req.file.filename;
-    const targetPath = path.join(uploadFolder, relativePath);
-
-    // Garantir que a pasta de destino existe
-    const destDir = path.dirname(targetPath);
-    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-
-    // 1. Garantir que temos o "Master" no .store
-    if (!fs.existsSync(masterPath)) {
-      // Move o arquivo temporário para o store (primeira vez que vemos este conteúdo)
-      fs.renameSync(tempFilePath, masterPath);
-    } else {
-      // Já temos esse conteúdo, deleta o temporário
-      fs.unlinkSync(tempFilePath);
-    }
-
-    // 2. Criar um Hard Link do Master para o local de destino do usuário
-    // Isso cria um "ponteiro" real no sistema de arquivos que não ocupa espaço extra
     try {
-      fs.linkSync(masterPath, targetPath);
-      console.log(`[UPLOAD] Link criado (Espaço economizado): ${relativePath}`);
-    } catch (linkErr) {
-      // Se falhar (ex: partições diferentes), faz uma cópia normal
-      fs.copyFileSync(masterPath, targetPath);
-      console.log(`[UPLOAD] Cópia realizada (Partições diferentes): ${relativePath}`);
+      if (!req.file) {
+        return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+      }
+
+      const folder = req.query.folder ? req.query.folder.replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '') : '';
+      const tempFilePath = req.file.path;
+      const mimetype = req.file.mimetype;
+      const size = req.file.size;
+
+      // Definir limites específicos por tipo
+      let limit = 50 * 1024 * 1024; // 50MB para imagens, gifs e músicas
+      let typeLabel = 'imagem/áudio';
+
+      if (mimetype.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(req.file.originalname)) {
+        limit = 1024 * 1024 * 1024; // 1GB para vídeos
+        typeLabel = 'vídeo';
+      }
+
+      if (size > limit) {
+        if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+        return res.status(400).json({ 
+          error: `Arquivo muito grande para o tipo ${typeLabel}. Limite: ${limit / (1024 * 1024)}MB` 
+        });
+      }
+
+      const fileHash = await calculateHash(tempFilePath);
+      
+      const masterPath = path.join(storeFolder, fileHash);
+      const relativePath = (folder ? folder + '/' : '') + req.file.filename;
+      const targetPath = path.join(uploadFolder, relativePath);
+
+      // Garantir que a pasta de destino existe (já deve existir pelo Multer, mas por segurança)
+      const destDir = path.dirname(targetPath);
+      if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+
+      // 1. Garantir que temos o "Master" no .store
+      if (!fs.existsSync(masterPath)) {
+        // Move o arquivo temporário para o store (primeira vez que vemos este conteúdo)
+        fs.renameSync(tempFilePath, masterPath);
+      } else {
+        // Já temos esse conteúdo, deleta o temporário
+        if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+      }
+
+      // 2. Criar um Hard Link do Master para o local de destino do usuário
+      try {
+        // Se o arquivo de destino já existir por algum motivo, removemos antes de linkar
+        if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+        fs.linkSync(masterPath, targetPath);
+        console.log(`[UPLOAD] Link criado (Espaço economizado): ${relativePath}`);
+      } catch (linkErr) {
+        // Se falhar (ex: partições diferentes), faz uma cópia normal
+        fs.copyFileSync(masterPath, targetPath);
+        console.log(`[UPLOAD] Cópia realizada (Fallback): ${relativePath} - Erro: ${linkErr.message}`);
+      }
+
+      // Registrar no mapeamento
+      fileHashes[fileHash] = masterPath; 
+      saveHashes();
+
+      const token = generatePermanentToken(relativePath);
+      const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
+      
+      console.log(`[UPLOAD] Arquivo processado: ${req.file.originalname} -> ${relativePath} (Hash: ${fileHash})`);
+      res.json({ 
+        message: 'Upload bem-sucedido', 
+        url: fileUrl, 
+        filename: req.file.filename, 
+        folder, 
+        duplicate: fs.existsSync(masterPath) 
+      });
+    } catch (err) {
+      console.error('[UPLOAD] Erro interno:', err);
+      res.status(500).json({ error: 'Erro ao processar upload' });
     }
-
-    // Registrar no mapeamento (opcional, mas útil para busca rápida)
-    fileHashes[fileHash] = masterPath; 
-    saveHashes();
-
-    const token = generatePermanentToken(relativePath);
-    const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
-    
-    console.log(`[UPLOAD] Arquivo processado: ${req.file.originalname} -> ${relativePath} (Hash: ${fileHash})`);
-    res.json({ 
-      message: 'Upload bem-sucedido', 
-      url: fileUrl, 
-      filename: req.file.filename, 
-      folder, 
-      duplicate: fs.existsSync(masterPath) 
-    });
-  } catch (err) {
-    console.error('[UPLOAD] Erro:', err);
-    res.status(500).json({ error: 'Erro ao processar upload' });
-  }
+  });
 });
 
 
@@ -336,6 +405,25 @@ app.delete('/delete', apiKeyMiddleware, function(req, res) {
       res.json({ message: 'Arquivo removido com sucesso' });
     });
   });
+});
+
+
+// Endpoint para sanitização manual (re-indexa e limpa .store)
+app.post('/sanitize', apiKeyMiddleware, async function(req, res) {
+  try {
+    console.log('[SANITIZE] Iniciando sanitização manual...');
+    const indexStats = await indexExistingFiles();
+    const cleanupStats = await cleanupStore();
+    
+    res.json({
+      message: 'Sanitização concluída',
+      index: indexStats,
+      cleanup: cleanupStats
+    });
+  } catch (err) {
+    console.error('[SANITIZE] Erro:', err);
+    res.status(500).json({ error: 'Erro durante a sanitização' });
+  }
 });
 
 

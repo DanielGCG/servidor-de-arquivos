@@ -36,7 +36,10 @@
         <div style="margin-top: 5px;">
             <small>A chave será salva no seu navegador para facilitar o uso.</small>
         </div>
-        <button onclick="loadFiles()" style="margin-top: 10px; background: #28a745;">Listar / Atualizar Arquivos</button>
+        <div style="margin-top: 10px; display: flex; gap: 10px;">
+            <button onclick="loadFiles()" style="background: #28a745;">Listar / Atualizar Arquivos</button>
+            <button onclick="sanitizeFiles()" style="background: #6f42c1;">Sanitizar (Limpar Duplicatas)</button>
+        </div>
     </div>
 
     <div class="upload-section">
@@ -99,9 +102,9 @@
             files.forEach(f => inoCounts[f.ino] = (inoCounts[f.ino] || 0) + 1);
 
             files.forEach(file => {
-                const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(file.name);
-                const isVideo = /\.(mp4|mov|webm|m4v)$/i.test(file.name);
-                const isAudio = /\.(mp3|wav|ogg)$/i.test(file.name);
+                const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(file.name);
+                const isVideo = /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(file.name);
+                const isAudio = /\.(mp3|wav|ogg|aac)$/i.test(file.name);
                 
                 const authenticatedUrl = file.url;
                 
@@ -133,6 +136,30 @@
             });
         } catch (err) {
             alert(err.message);
+        }
+    }
+
+    async function sanitizeFiles() {
+        const apiKey = document.getElementById('apiKey').value;
+        if (!apiKey) return alert('Por favor, insira a API Key');
+
+        if (!confirm('Isso irá verificar todos os arquivos em busca de duplicatas e limpar o armazenamento interno. Continuar?')) return;
+
+        try {
+            const response = await fetch('/sanitize', {
+                method: 'POST',
+                headers: { 'x-api-key': apiKey }
+            });
+
+            const result = await response.json();
+            if (response.ok) {
+                alert(`Sanitização concluída!\n\nArquivos processados: ${result.index.processed}\nRemovidos do .store: ${result.cleanup.removed}\nMantidos no .store: ${result.cleanup.kept}`);
+                loadFiles();
+            } else {
+                alert('Erro: ' + result.error);
+            }
+        } catch (err) {
+            alert('Erro na conexão');
         }
     }
 
