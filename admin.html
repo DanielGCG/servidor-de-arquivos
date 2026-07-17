@@ -5,24 +5,70 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gerenciador de Arquivos</title>
     <style>
-        body { font-family: sans-serif; margin: 20px; background: #f4f4f9; }
+        body { font-family: sans-serif; margin: 20px; background: #f4f4f9; color: #333; padding-bottom: 80px; }
         .container { max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; }
-        .auth-section, .upload-section { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
-        input[type="text"], input[type="password"], input[type="file"] { padding: 8px; margin: 5px 0; width: 100%; box-sizing: border-box; }
-        button { padding: 10px 15px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+        h1 { border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .auth-section, .upload-section, .migrate-section { margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background: #fafafa; }
+        input[type="text"], input[type="password"], input[type="file"] { padding: 8px; margin: 5px 0; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 15px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
         button:hover { background: #0056b3; }
-        button.delete { background: #dc3545; }
+        button.delete { background: #dc3545; padding: 6px 10px; font-size: 0.9em; }
         button.delete:hover { background: #a71d2a; }
+        
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
         th, td { text-align: left; padding: 12px; border-bottom: 1px solid #ddd; }
-        tr:hover { background: #f1f1f1; }
-        .preview { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; }
+        th { background: #f8f9fa; font-weight: 600; }
+        
+        .master-row { cursor: pointer; transition: background 0.2s; }
+        .master-row:hover { background: #f1f5f9; }
+        .master-row.expanded { background: #e9ecef; }
+        
+        .links-row { display: none; background: #fcfcfc; }
+        .links-row.active { display: table-row; }
+        .links-container { padding: 10px 10px 10px 40px; }
+        .link-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px dashed #ddd; }
+        .link-item:last-child { border-bottom: none; }
+        
+        .preview { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; border: 1px solid #ddd; }
         .preview-media { max-width: 100px; max-height: 60px; border-radius: 4px; }
-        .status { margin-top: 10px; font-weight: bold; }
-        .badge { padding: 4px 8px; border-radius: 12px; font-size: 0.8em; color: white; }
+        
+        .badge { padding: 4px 8px; border-radius: 12px; font-size: 0.8em; color: white; display: inline-block; }
         .badge-green { background: #28a745; }
         .badge-blue { background: #007bff; }
+        
+        .status { margin-top: 10px; font-weight: bold; }
+        
+        .expand-icon { display: inline-block; width: 16px; text-align: center; transition: transform 0.2s; }
+        .master-row.expanded .expand-icon { transform: rotate(90deg); }
+
+        /* Floating Action Bar */
+        .fab-container {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: #333;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 1000;
+        }
+        .fab-container.visible {
+            transform: translateX(-50%) translateY(0);
+        }
+        .fab-container button {
+            padding: 8px 15px;
+            font-size: 0.9em;
+        }
+
+        /* Progresso da Migração */
+        .progress-bar-bg { width: 100%; background: #ddd; border-radius: 4px; overflow: hidden; margin-top: 10px; display: none; }
+        .progress-bar-fill { height: 20px; background: #28a745; width: 0%; transition: width 0.3s; }
     </style>
 </head>
 <body>
@@ -30,35 +76,51 @@
 <div class="container">
     <h1>Gerenciador de Arquivos</h1>
 
+    <!-- Migração e Armazenamento -->
+    <div class="migrate-section">
+        <h3 style="margin-top: 0;">Configurações de Armazenamento</h3>
+        <p>Raiz Atual: <strong id="currentRootPath">Carregando...</strong></p>
+        <div style="display: flex; gap: 10px; margin-top: 10px;">
+            <input type="text" id="newRootInput" placeholder="Ex: D:\TecoUploads ou /mnt/hd2/uploads" style="flex: 1;">
+            <button onclick="startMigration()" style="background: #17a2b8;">Migrar Disco/Pasta</button>
+        </div>
+        <div class="progress-bar-bg" id="migrationProgressBg">
+            <div class="progress-bar-fill" id="migrationProgressFill"></div>
+        </div>
+        <p id="migrationStatusText" style="font-size: 0.9em; color: #555; margin-top: 5px;"></p>
+    </div>
+
+    <!-- Autenticação e Ações Globais -->
     <div class="auth-section">
         <label><strong>Chave da API (Obrigatória):</strong></label>
         <input type="password" id="apiKey" placeholder="Insira sua API Key aqui..." oninput="saveKey()">
-        <div style="margin-top: 5px;">
-            <small>A chave será salva no seu navegador para facilitar o uso.</small>
-        </div>
-        <div style="margin-top: 10px; display: flex; gap: 10px;">
-            <button onclick="loadFiles()" style="background: #28a745;">Listar / Atualizar Arquivos</button>
-            <button onclick="sanitizeFiles()" style="background: #6f42c1;">Sanitizar (Limpar Duplicatas)</button>
+        <div style="margin-top: 5px; color: #666; font-size: 0.9em;">A chave será salva no seu navegador para facilitar o uso.</div>
+        
+        <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+            <button onclick="loadFiles()" style="background: #28a745;">Listar Arquivos</button>
+            <button onclick="sanitizeFiles()" style="background: #6f42c1;" title="Varre o sistema buscando arquivos duplicados e os transforma em Hard Links para economizar espaço.">Forçar Deduplicação e Otimização</button>
         </div>
     </div>
 
+    <!-- Upload -->
     <div class="upload-section">
-        <h3>Upload de Arquivo</h3>
-        <p><small>Utiliza a chave configurada acima.</small></p>
+        <h3 style="margin-top: 0;">Upload de Arquivo</h3>
         <input type="file" id="fileInput">
         <input type="text" id="folderInput" placeholder="Pasta (opcional, ex: imagens)">
         <button onclick="uploadFile()">Fazer Upload</button>
         <div id="uploadStatus" class="status"></div>
     </div>
 
+    <!-- Tabela de Arquivos -->
     <table id="fileTable">
         <thead>
             <tr>
-                <th>Preview</th>
-                <th>Nome/Caminho</th>
+                <th style="width: 40px;"></th>
+                <th style="width: 40px;"></th>
+                <th style="width: 70px;">Preview</th>
+                <th>Arquivo Físico (Inode)</th>
                 <th>Tamanho</th>
-                <th>Status</th>
-                <th>Ações</th>
+                <th>Links Associados</th>
             </tr>
         </thead>
         <tbody id="fileList">
@@ -67,13 +129,24 @@
     </table>
 </div>
 
+<!-- Floating Action Bar -->
+<div class="fab-container" id="fabAction">
+    <span id="fabCount">0 itens selecionados</span>
+    <button onclick="moveSelected()" style="background: #ffc107; color: #333;">Mover</button>
+    <button onclick="deleteSelected()" style="background: #dc3545;">Excluir</button>
+    <button onclick="clearSelection()" style="background: transparent; border: 1px solid white;">Cancelar</button>
+</div>
+
 <script>
-    // Carregar chave salva ao abrir a página
+    let selectedLinks = new Set();
+    let migrationInterval = null;
+
     window.onload = () => {
         const savedKey = localStorage.getItem('server_api_key');
         if (savedKey) {
             document.getElementById('apiKey').value = savedKey;
-            loadFiles(); // Tenta carregar os arquivos automaticamente se houver chave
+            loadFiles();
+            checkMigrationStatus(); 
         }
     };
 
@@ -82,85 +155,273 @@
         localStorage.setItem('server_api_key', key);
     }
 
+    function toggleRow(ino) {
+        const masterRow = document.getElementById(`master-${ino}`);
+        const linksRow = document.getElementById(`links-${ino}`);
+        if (masterRow && linksRow) {
+            masterRow.classList.toggle('expanded');
+            linksRow.classList.toggle('active');
+        }
+    }
+
+    // Gerenciamento de Checkboxes
+    function toggleMasterCheckbox(ino, links) {
+        event.stopPropagation();
+        const masterCb = document.getElementById(`cb-master-${ino}`);
+        const isChecked = masterCb.checked;
+        
+        links.forEach(linkPath => {
+            const childCb = document.getElementById(`cb-link-${linkPath.replace(/[^a-zA-Z0-9]/g, '')}`);
+            if (childCb) {
+                childCb.checked = isChecked;
+                if (isChecked) selectedLinks.add(linkPath);
+                else selectedLinks.delete(linkPath);
+            }
+        });
+        updateFAB();
+    }
+
+    function toggleChildCheckbox(linkPath) {
+        const childCb = document.getElementById(`cb-link-${linkPath.replace(/[^a-zA-Z0-9]/g, '')}`);
+        if (childCb.checked) selectedLinks.add(linkPath);
+        else selectedLinks.delete(linkPath);
+        updateFAB();
+    }
+
+    function clearSelection() {
+        selectedLinks.clear();
+        document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+        updateFAB();
+    }
+
+    function updateFAB() {
+        const fab = document.getElementById('fabAction');
+        const countText = document.getElementById('fabCount');
+        if (selectedLinks.size > 0) {
+            countText.innerText = `${selectedLinks.size} link(s) selecionado(s)`;
+            fab.classList.add('visible');
+        } else {
+            fab.classList.remove('visible');
+        }
+    }
+
+    // Migração de HD
+    async function checkMigrationStatus() {
+        const apiKey = document.getElementById('apiKey').value;
+        if (!apiKey) return;
+
+        try {
+            const response = await fetch('/migrate-status', { headers: { 'x-api-key': apiKey } });
+            if (response.ok) {
+                const state = await response.json();
+                document.getElementById('currentRootPath').innerText = state.currentRoot;
+                
+                if (state.isMigrating) {
+                    document.getElementById('migrationProgressBg').style.display = 'block';
+                    document.getElementById('migrationProgressFill').style.width = state.progress + '%';
+                    document.getElementById('migrationStatusText').innerText = state.status;
+                    if (!migrationInterval) migrationInterval = setInterval(checkMigrationStatus, 1000);
+                } else {
+                    document.getElementById('migrationProgressBg').style.display = 'none';
+                    if (state.status) {
+                        document.getElementById('migrationStatusText').innerText = state.status;
+                        if (state.error) document.getElementById('migrationStatusText').style.color = 'red';
+                    }
+                    if (migrationInterval) {
+                        clearInterval(migrationInterval);
+                        migrationInterval = null;
+                        loadFiles(); // recarregar lista pós migração
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('Erro ao buscar status de migração', e);
+        }
+    }
+
+    async function startMigration() {
+        const apiKey = document.getElementById('apiKey').value;
+        const newRoot = document.getElementById('newRootInput').value;
+        if (!apiKey) return alert('Insira a API Key.');
+        if (!newRoot) return alert('Insira o caminho do novo disco/pasta.');
+
+        if (!confirm(`Atenção! Isso iniciará a cópia de TODOS os arquivos para:\n\n${newRoot}\n\nTem certeza?`)) return;
+
+        try {
+            const response = await fetch('/migrate-root', {
+                method: 'POST',
+                headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ newRoot })
+            });
+            const data = await response.json();
+            if (response.ok) {
+                alert(data.message);
+                checkMigrationStatus();
+            } else {
+                alert('Erro: ' + data.error);
+            }
+        } catch (e) {
+            alert('Erro na conexão');
+        }
+    }
+
+    // Listagem
     async function loadFiles() {
         const apiKey = document.getElementById('apiKey').value;
         if (!apiKey) return alert('Por favor, insira a API Key');
 
-        try {
-            const response = await fetch('/list', {
-                headers: { 'x-api-key': apiKey }
-            });
+        const listElement = document.getElementById('fileList');
+        listElement.innerHTML = '<tr><td colspan="6">Carregando...</td></tr>';
+        clearSelection();
 
+        try {
+            const response = await fetch('/list', { headers: { 'x-api-key': apiKey } });
             if (!response.ok) throw new Error('Falha ao carregar arquivos. Verifique a chave.');
 
-            const files = await response.json();
-            const listElement = document.getElementById('fileList');
+            const groupedFiles = await response.json();
             listElement.innerHTML = '';
+            checkMigrationStatus();
 
-            // Contar ocorrências de cada inode para identificar duplicatas
-            const inoCounts = {};
-            files.forEach(f => inoCounts[f.ino] = (inoCounts[f.ino] || 0) + 1);
+            if (groupedFiles.length === 0) {
+                listElement.innerHTML = '<tr><td colspan="6">Nenhum arquivo encontrado.</td></tr>';
+                return;
+            }
 
-            files.forEach(file => {
-                const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(file.name);
-                const isVideo = /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(file.name);
-                const isAudio = /\.(mp3|wav|ogg|aac)$/i.test(file.name);
+            groupedFiles.forEach(group => {
+                const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(group.logicalLinks[0].name);
+                const isVideo = /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(group.logicalLinks[0].name);
+                const isAudio = /\.(mp3|wav|ogg|aac)$/i.test(group.logicalLinks[0].name);
                 
-                const authenticatedUrl = file.url;
-                
-                let previewHtml = '---';
-                if (isImage) {
-                    previewHtml = `<img src="${authenticatedUrl}" class="preview">`;
-                } else if (isVideo) {
-                    previewHtml = `<video src="${authenticatedUrl}" class="preview-media" muted></video>`;
-                } else if (isAudio) {
-                    previewHtml = `<audio src="${authenticatedUrl}" style="width: 100px" controls></audio>`;
-                }
+                const previewUrl = group.logicalLinks[0].url;
+                let previewHtml = '<div style="color:#aaa; font-size:24px;">📄</div>';
+                if (isImage) previewHtml = `<img src="${previewUrl}" class="preview">`;
+                else if (isVideo) previewHtml = `<video src="${previewUrl}" class="preview-media" muted></video>`;
+                else if (isAudio) previewHtml = `<div style="font-size:24px;">🎵</div>`;
 
-                const isDuplicate = inoCounts[file.ino] > 1;
-                const statusHtml = isDuplicate 
-                    ? '<span class="badge badge-green">Deduplicado (Link)</span>' 
-                    : '<span class="badge badge-blue">Único</span>';
+                const sizeKB = (group.size / 1024).toFixed(2);
+                const badgeClass = group.linkCount > 1 ? 'badge-green' : 'badge-blue';
+                const linkPathsJson = JSON.stringify(group.logicalLinks.map(l => l.path)).replace(/"/g, '&quot;');
 
-                const row = document.createElement('tr');
-                row.innerHTML = `
+                // Linha Mestre
+                const masterRow = document.createElement('tr');
+                masterRow.id = `master-${group.ino}`;
+                masterRow.className = 'master-row';
+                masterRow.onclick = (e) => {
+                    if (e.target.tagName.toLowerCase() !== 'input') toggleRow(group.ino);
+                };
+                masterRow.innerHTML = `
+                    <td style="text-align: center;"><span class="expand-icon">▶</span></td>
+                    <td style="text-align: center;"><input type="checkbox" id="cb-master-${group.ino}" onclick="toggleMasterCheckbox('${group.ino}', ${linkPathsJson})"></td>
                     <td>${previewHtml}</td>
-                    <td><a href="${authenticatedUrl}" target="_blank">${file.path}</a></td>
-                    <td>${(file.size / 1024).toFixed(2)} KB</td>
-                    <td>${statusHtml}</td>
                     <td>
-                        <button class="delete" onclick="deleteFile('${file.path}')">Remover</button>
+                        <strong>Inode: ${group.ino}</strong><br>
+                        <small style="color: #666;">${group.logicalLinks[0].name}</small>
+                    </td>
+                    <td>${sizeKB} KB</td>
+                    <td><span class="badge ${badgeClass}">${group.linkCount} link(s)</span></td>
+                `;
+
+                // Linha Expansível
+                const linksRow = document.createElement('tr');
+                linksRow.id = `links-${group.ino}`;
+                linksRow.className = 'links-row';
+                
+                let linksHtml = group.logicalLinks.map(link => {
+                    const safeId = link.path.replace(/[^a-zA-Z0-9]/g, '');
+                    return `
+                        <div class="link-item">
+                            <span>
+                                <input type="checkbox" id="cb-link-${safeId}" onclick="toggleChildCheckbox('${link.path.replace(/\\/g, '\\\\')}')" style="margin-right: 10px;">
+                                <a href="${link.url}" target="_blank" style="text-decoration:none; color:#007bff;">${link.path}</a>
+                            </span>
+                        </div>
+                    `;
+                }).join('');
+
+                linksRow.innerHTML = `
+                    <td colspan="6" style="padding: 0;">
+                        <div class="links-container">
+                            <h4 style="margin-top:0; margin-bottom: 10px; color: #555;">Caminhos no sistema apontando para este arquivo:</h4>
+                            ${linksHtml}
+                        </div>
                     </td>
                 `;
-                listElement.appendChild(row);
+
+                listElement.appendChild(masterRow);
+                listElement.appendChild(linksRow);
             });
         } catch (err) {
-            alert(err.message);
+            listElement.innerHTML = `<tr><td colspan="6" style="color:red;">${err.message}</td></tr>`;
         }
     }
 
+    // Ações em Massa
+    async function moveSelected() {
+        if (selectedLinks.size === 0) return;
+        const newFolder = prompt('Digite o nome da nova pasta destino (ex: imagens/arquivadas):\nDeixe em branco para mover para a raiz.');
+        if (newFolder === null) return; // cancelou
+
+        const apiKey = document.getElementById('apiKey').value;
+        const moves = Array.from(selectedLinks).map(path => ({ oldPath: path, newFolder: newFolder.trim() }));
+        
+        try {
+            const response = await fetch('/move', {
+                method: 'POST',
+                headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ moves })
+            });
+            const data = await response.json();
+            if (response.ok) {
+                alert('Movimentação concluída!');
+                loadFiles();
+            } else {
+                alert('Erro: ' + data.error);
+            }
+        } catch (e) {
+            alert('Erro na conexão');
+        }
+    }
+
+    async function deleteSelected() {
+        if (selectedLinks.size === 0) return;
+        if (!confirm(`Tem certeza que deseja excluir DEIFINITIVAMENTE os ${selectedLinks.size} links selecionados?`)) return;
+
+        const apiKey = document.getElementById('apiKey').value;
+        const paths = Array.from(selectedLinks);
+
+        try {
+            const response = await fetch('/delete-batch', {
+                method: 'POST',
+                headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths })
+            });
+            const data = await response.json();
+            if (response.ok) {
+                loadFiles();
+            } else {
+                alert('Erro: ' + data.error);
+            }
+        } catch (e) {
+            alert('Erro na conexão');
+        }
+    }
+
+    // Outros
     async function sanitizeFiles() {
         const apiKey = document.getElementById('apiKey').value;
         if (!apiKey) return alert('Por favor, insira a API Key');
-
-        if (!confirm('Isso irá verificar todos os arquivos em busca de duplicatas e limpar o armazenamento interno. Continuar?')) return;
+        if (!confirm('Isso irá verificar todos os arquivos soltos e forçar a criação de hard links para economizar espaço. Continuar?')) return;
 
         try {
-            const response = await fetch('/sanitize', {
-                method: 'POST',
-                headers: { 'x-api-key': apiKey }
-            });
-
+            const response = await fetch('/sanitize', { method: 'POST', headers: { 'x-api-key': apiKey } });
             const result = await response.json();
             if (response.ok) {
-                alert(`Sanitização concluída!\n\nArquivos processados: ${result.index.processed}\nRemovidos do .store: ${result.cleanup.removed}\nMantidos no .store: ${result.cleanup.kept}`);
+                alert(`Otimização concluída!\n\nArquivos varridos: ${result.index.processed}\nÓrfãos removidos do cache: ${result.cleanup.removed}`);
                 loadFiles();
             } else {
                 alert('Erro: ' + result.error);
             }
-        } catch (err) {
-            alert('Erro na conexão');
-        }
+        } catch (err) { alert('Erro na conexão'); }
     }
 
     async function uploadFile() {
@@ -176,6 +437,8 @@
         formData.append('file', fileInput.files[0]);
 
         status.innerText = 'Enviando...';
+        status.style.color = '#333';
+        
         try {
             const response = await fetch(`/upload?folder=${folderInput}`, {
                 method: 'POST',
@@ -186,41 +449,17 @@
             const result = await response.json();
             if (response.ok) {
                 status.innerText = 'Upload concluído!';
+                status.style.color = 'green';
                 loadFiles();
             } else {
                 status.innerText = 'Erro: ' + result.error;
+                status.style.color = 'red';
             }
         } catch (err) {
             status.innerText = 'Erro na conexão';
-        }
-    }
-
-    async function deleteFile(filepath) {
-        if (!confirm(`Tem certeza que deseja remover ${filepath}?`)) return;
-
-        const apiKey = document.getElementById('apiKey').value;
-        try {
-            const response = await fetch('/delete', {
-                method: 'DELETE',
-                headers: { 
-                    'x-api-key': apiKey,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ filepath })
-            });
-
-            if (response.ok) {
-                alert('Arquivo removido');
-                loadFiles();
-            } else {
-                const result = await response.json();
-                alert('Erro: ' + result.error);
-            }
-        } catch (err) {
-            alert('Erro na conexão');
+            status.style.color = 'red';
         }
     }
 </script>
-
 </body>
 </html>

@@ -3,3 +3,4 @@ node_modules/
 hashes.json
 uploads/
 *.log
+storage_config.json
