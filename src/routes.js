@@ -8,16 +8,33 @@ const services = require('./services');
 
 const router = express.Router();
 
+function sanitizeFolder(folder) {
+  return (folder || '').replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '');
+}
+
+function isAllowedFile(file) {
+  const allowedTypes = [
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+    'video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v', 'video/x-matroska', 'video/avi', 'video/mpeg', 'video/x-msvideo',
+    'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/ogg', 'audio/aac',
+    'application/octet-stream'
+  ];
+  const isAllowedMime = allowedTypes.includes(file.mimetype);
+  const isAllowedExt = /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg|mp3|wav|ogg|aac|jpg|jpeg|png|gif|webp|svg)$/i.test(file.originalname);
+  return isAllowedMime || isAllowedExt;
+}
+
 const storage = multer.diskStorage({
   destination: function(req, file, cb) {
-    let folder = req.query.folder || '';
-    folder = folder.replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '');
+    // Com ticket, a pasta é ditada pelo backend e não pelo cliente
+    const folder = sanitizeFolder(req.uploadTicket ? req.uploadTicket.f : req.query.folder);
     const dest = path.join(config.state.uploadFolder, folder);
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
     cb(null, dest);
   },
   filename: function(req, file, cb) {
-    cb(null, Date.now() + '-' + file.originalname);
+    const name = req.uploadTicket && req.uploadTicket.n ? req.uploadTicket.n : file.originalname;
+    cb(null, Date.now() + '-' + name);
   }
 });
 
@@ -25,17 +42,7 @@ const upload = multer({
   storage: storage,
   limits: { fileSize: 1024 * 1024 * 1024 },
   fileFilter: function(req, file, cb) {
-    const allowedTypes = [
-      'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
-      'video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v', 'video/x-matroska', 'video/avi', 'video/mpeg', 'video/x-msvideo',
-      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/ogg', 'audio/aac',
-      'application/octet-stream'
-    ];
-    
-    const isAllowedMime = allowedTypes.includes(file.mimetype);
-    const isAllowedExt = /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg|mp3|wav|ogg|aac|jpg|jpeg|png|gif|webp|svg)$/i.test(file.originalname);
-
-    if (isAllowedMime || isAllowedExt) {
+    if (isAllowedFile(file)) {
       cb(null, true);
     } else {
       console.log(`[UPLOAD] Bloqueado: ${file.originalname}`);
@@ -44,52 +51,88 @@ const upload = multer({
   }
 });
 
-router.post('/upload', auth.apiKeyMiddleware, function(req, res) {
-  upload.single('file')(req, res, async function(err) {
-    if (err) return res.status(400).json({ error: err.message });
-    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+// Upload direto: limite e tipos vêm do ticket assinado
+function directUpload(req, res, next) {
+  const ticket = req.uploadTicket;
+  const handler = multer({
+    storage: storage,
+    limits: { fileSize: ticket.m || 50 * 1024 * 1024, files: 1 },
+    fileFilter: function(req, file, cb) {
+      const prefixes = Array.isArray(ticket.t) ? ticket.t : [];
+      const typeOk = prefixes.length === 0 || prefixes.some(p => (file.mimetype || '').startsWith(p));
+      if (isAllowedFile(file) && typeOk) return cb(null, true);
+      console.log(`[UPLOAD] Bloqueado (ticket): ${file.originalname} (${file.mimetype})`);
+      cb(new Error('Tipo não permitido'));
+    }
+  }).single('file');
+
+  handler(req, res, function(err) {
+    if (err) {
+      const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Arquivo muito grande' : err.message });
+    }
+    next();
+  });
+}
+
+async function finalizeUpload(req, res, folder, limit) {
+  if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+
+  try {
+    const tempFilePath = req.file.path;
+    const size = req.file.size;
+
+    if (size > limit) {
+      if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+      return res.status(400).json({ error: `Arquivo muito grande. Limite: ${limit / (1024 * 1024)}MB` });
+    }
+
+    const fileHash = await services.calculateHash(tempFilePath);
+    const masterPath = path.join(config.state.storeFolder, fileHash);
+    const relativePath = (folder ? folder + '/' : '') + req.file.filename;
+    const targetPath = path.join(config.state.uploadFolder, relativePath);
+
+    if (!fs.existsSync(masterPath)) {
+      fs.renameSync(tempFilePath, masterPath);
+    } else if (fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+    }
 
     try {
-      const folder = req.query.folder ? req.query.folder.replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '') : '';
-      const tempFilePath = req.file.path;
-      const size = req.file.size;
-      const isMediaLarge = req.file.mimetype.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(req.file.originalname);
-      const limit = isMediaLarge ? 1024 * 1024 * 1024 : 50 * 1024 * 1024;
-
-      if (size > limit) {
-        if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-        return res.status(400).json({ error: `Arquivo muito grande. Limite: ${limit / (1024 * 1024)}MB` });
-      }
-
-      const fileHash = await services.calculateHash(tempFilePath);
-      const masterPath = path.join(config.state.storeFolder, fileHash);
-      const relativePath = (folder ? folder + '/' : '') + req.file.filename;
-      const targetPath = path.join(config.state.uploadFolder, relativePath);
-
-      if (!fs.existsSync(masterPath)) {
-        fs.renameSync(tempFilePath, masterPath);
-      } else if (fs.existsSync(tempFilePath)) {
-        fs.unlinkSync(tempFilePath);
-      }
-
-      try {
-        if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-        fs.linkSync(masterPath, targetPath);
-      } catch (linkErr) {
-        fs.copyFileSync(masterPath, targetPath);
-      }
-
-      config.state.fileHashes[fileHash] = masterPath;
-      config.saveHashes();
-
-      const token = auth.generatePermanentToken(relativePath);
-      const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
-      
-      res.json({ message: 'Upload bem-sucedido', url: fileUrl, duplicate: fs.existsSync(masterPath) });
-    } catch (err) {
-      res.status(500).json({ error: 'Erro ao processar upload' });
+      if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+      fs.linkSync(masterPath, targetPath);
+    } catch (linkErr) {
+      fs.copyFileSync(masterPath, targetPath);
     }
+
+    config.state.fileHashes[fileHash] = masterPath;
+    config.saveHashes();
+
+    const token = auth.generatePermanentToken(relativePath);
+    const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
+
+    res.json({ message: 'Upload bem-sucedido', url: fileUrl, duplicate: fs.existsSync(masterPath) });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao processar upload' });
+  }
+}
+
+router.post('/upload', auth.apiKeyMiddleware, function(req, res) {
+  upload.single('file')(req, res, function(err) {
+    if (err) return res.status(400).json({ error: err.message });
+
+    const folder = sanitizeFolder(req.query.folder);
+    const file = req.file;
+    const isMediaLarge = file && (file.mimetype.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(file.originalname));
+    const limit = isMediaLarge ? 1024 * 1024 * 1024 : 50 * 1024 * 1024;
+    finalizeUpload(req, res, folder, limit);
   });
+});
+
+// Upload direto do navegador, autenticado por ticket emitido pelo backend (sem expor a API_KEY)
+router.post('/upload-direct', auth.uploadTicketMiddleware, directUpload, function(req, res) {
+  const folder = sanitizeFolder(req.uploadTicket.f);
+  finalizeUpload(req, res, folder, req.uploadTicket.m || 50 * 1024 * 1024);
 });
 
 router.get('/list', auth.apiKeyMiddleware, function(req, res) {
