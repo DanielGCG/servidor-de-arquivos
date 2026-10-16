@@ -433,18 +433,23 @@
         if (!apiKey) return alert('Insira a API Key primeiro');
         if (fileInput.files.length === 0) return alert('Selecione um arquivo');
 
-        const formData = new FormData();
-        formData.append('file', fileInput.files[0]);
+        const file = fileInput.files[0];
 
         status.innerText = 'Enviando...';
         status.style.color = '#333';
         
         try {
-            const response = await fetch(`/upload?folder=${folderInput}`, {
+            const ticketResponse = await fetch('/upload-ticket', {
                 method: 'POST',
-                headers: { 'x-api-key': apiKey },
-                body: formData
+                headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folder: folderInput, name: file.name, type: file.type })
             });
+            const ticket = await ticketResponse.json();
+            if (!ticketResponse.ok) throw new Error(ticket.error || 'Não foi possível criar o ticket');
+
+            const formData = new FormData();
+            formData.append('file', file);
+            const response = await fetch(ticket.uploadUrl, { method: 'POST', body: formData });
 
             const result = await response.json();
             if (response.ok) {

@@ -51,6 +51,19 @@ function signTicketPayload(b64) {
     .digest('base64url');
 }
 
+function createUploadTicket({ folder, filename, maxBytes, mimePrefixes = [], ttlMs = 10 * 60 * 1000 }) {
+  const payload = {
+    f: folder || '',
+    n: filename,
+    m: maxBytes,
+    t: mimePrefixes,
+    e: Date.now() + ttlMs,
+    j: crypto.randomBytes(12).toString('hex')
+  };
+  const b64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  return `${b64}.${signTicketPayload(b64)}`;
+}
+
 function verifyUploadTicket(ticket) {
   if (typeof ticket !== 'string') return null;
   const [b64, sig] = ticket.split('.');
@@ -100,5 +113,6 @@ module.exports = {
   verifyPermanentToken,
   apiKeyMiddleware,
   verifyUploadTicket,
-  uploadTicketMiddleware
+  uploadTicketMiddleware,
+  createUploadTicket
 };

@@ -38,19 +38,6 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 1024 * 1024 * 1024 },
-  fileFilter: function(req, file, cb) {
-    if (isAllowedFile(file)) {
-      cb(null, true);
-    } else {
-      console.log(`[UPLOAD] Bloqueado: ${file.originalname}`);
-      cb(new Error('Tipo não permitido'));
-    }
-  }
-});
-
 // Upload direto: limite e tipos vêm do ticket assinado
 function directUpload(req, res, next) {
   const ticket = req.uploadTicket;
@@ -117,16 +104,19 @@ async function finalizeUpload(req, res, folder, limit) {
   }
 }
 
-router.post('/upload', auth.apiKeyMiddleware, function(req, res) {
-  upload.single('file')(req, res, function(err) {
-    if (err) return res.status(400).json({ error: err.message });
+router.post('/upload-ticket', auth.apiKeyMiddleware, function(req, res) {
+  const { folder, name, type } = req.body || {};
+  const filename = path.basename(String(name || ''));
+  const mime = String(type || 'application/octet-stream');
+  if (!filename || !folder) return res.status(400).json({ error: 'folder e name são obrigatórios' });
 
-    const folder = sanitizeFolder(req.query.folder);
-    const file = req.file;
-    const isMediaLarge = file && (file.mimetype.startsWith('video/') || /\.(mp4|mov|webm|m4v|mkv|avi|mpg|mpeg)$/i.test(file.originalname));
-    const limit = isMediaLarge ? 1024 * 1024 * 1024 : 50 * 1024 * 1024;
-    finalizeUpload(req, res, folder, limit);
+  const ticket = auth.createUploadTicket({
+    folder: sanitizeFolder(folder),
+    filename,
+    maxBytes: 1024 * 1024 * 1024,
+    mimePrefixes: mime === 'application/octet-stream' ? [] : [`${mime.split('/')[0]}/`, 'application/octet-stream']
   });
+  res.json({ uploadUrl: `/upload-direct?ticket=${encodeURIComponent(ticket)}` });
 });
 
 // Upload direto do navegador, autenticado por ticket emitido pelo backend (sem expor a API_KEY)
