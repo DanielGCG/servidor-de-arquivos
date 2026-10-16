@@ -447,7 +447,7 @@
             const ticket = await ticketResponse.json();
             if (!ticketResponse.ok) throw new Error(ticket.error || 'Não foi possível criar o ticket');
 
-            const chunkSize = 64 * 1024 * 1024;
+            const chunkSize = 8 * 1024 * 1024;
             const total = Math.ceil(file.size / chunkSize);
             let result = null;
             for (let index = 0; index < total; index++) {

@@ -51,11 +51,12 @@ function signTicketPayload(b64) {
     .digest('base64url');
 }
 
-function createUploadTicket({ folder, filename, maxBytes, mimePrefixes = [], ttlMs = 10 * 60 * 1000 }) {
+function createUploadTicket({ folder, filename, maxBytes, size, mimePrefixes = [], ttlMs = 10 * 60 * 1000 }) {
   const payload = {
     f: folder || '',
     n: filename,
     m: maxBytes,
+    s: Number.isFinite(Number(size)) ? Number(size) : undefined,
     t: mimePrefixes,
     e: Date.now() + ttlMs,
     j: crypto.randomBytes(12).toString('hex')
@@ -101,9 +102,6 @@ function uploadTicketMiddleware(req, res, next) {
   if (!payload) {
     console.log(`[AUTH] Ticket de upload inválido/expirado: ${req.originalUrl.split('?')[0]}`);
     return res.status(401).json({ error: 'Ticket de upload inválido ou expirado' });
-  }
-  if (req.query.chunked !== '1' && !consumeTicket(payload)) {
-    return res.status(401).json({ error: 'Ticket de upload já utilizado' });
   }
   req.uploadTicket = payload;
   next();

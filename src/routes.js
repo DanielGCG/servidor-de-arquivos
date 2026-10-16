@@ -7,8 +7,10 @@ const auth = require('./auth');
 const services = require('./services');
 
 const router = express.Router();
-const CHUNK_BYTES = 64 * 1024 * 1024;
+const CHUNK_BYTES = 16 * 1024 * 1024;
 const MIN_CHUNK_BYTES = 1024 * 1024;
+const completedUploads = new Map();
+const processingUploads = new Map();
 
 function getPublicBaseUrl(req) {
   return (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
@@ -92,6 +94,9 @@ function chunkUpload(req, res) {
   if (total > 10000 || (Number.isFinite(expectedSize) && total > Math.ceil(expectedSize / MIN_CHUNK_BYTES))) {
     return res.status(400).json({ error: 'Quantidade de partes inválida' });
   }
+  if (completedUploads.has(req.uploadTicket.j)) {
+    return res.json(completedUploads.get(req.uploadTicket.j));
+  }
 
   const handler = multer({
     storage: chunkStorage,
@@ -102,8 +107,14 @@ function chunkUpload(req, res) {
   handler(req, res, async function(err) {
     if (err) {
       const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      console.error('[UPLOAD] Falha ao receber parte:', {
+        code: err.code,
+        message: err.message,
+        index,
+        total
+      });
       return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE'
-        ? 'Não foi possível enviar esta parte. Tente novamente.'
+        ? `Parte maior que o limite de ${CHUNK_BYTES / (1024 * 1024)}MB`
         : err.message });
     }
     if (!req.file) return res.status(400).json({ error: 'Nenhuma parte enviada' });
@@ -117,6 +128,14 @@ function chunkUpload(req, res) {
       return res.json({ received: true, index, complete: false });
     }
 
+    if (completedUploads.has(req.uploadTicket.j)) {
+      return res.json(completedUploads.get(req.uploadTicket.j));
+    }
+    if (processingUploads.has(req.uploadTicket.j)) {
+      const result = await processingUploads.get(req.uploadTicket.j);
+      return result ? res.json(result) : res.status(500).json({ error: 'Erro ao processar upload' });
+    }
+
     if (Number.isFinite(expectedSize)) {
       const receivedSize = received.reduce((sum, part) => sum + fs.statSync(part).size, 0);
       if (receivedSize !== expectedSize) {
@@ -124,8 +143,8 @@ function chunkUpload(req, res) {
       }
     }
 
-    const assembledPath = path.join(chunkDir, 'assembled.upload');
-    try {
+    const processing = (async () => {
+      const assembledPath = path.join(chunkDir, 'assembled.upload');
       if (fs.existsSync(assembledPath)) fs.unlinkSync(assembledPath);
       const output = fs.createWriteStream(assembledPath);
       output.on('error', error => console.error('[UPLOAD] Erro ao gravar upload montado:', error));
@@ -151,11 +170,22 @@ function chunkUpload(req, res) {
         filename: `${Date.now()}-${req.uploadTicket.n}`
       };
       const folder = sanitizeFolder(req.uploadTicket.f);
-      await finalizeUpload(req, res, folder, req.uploadTicket.m || 50 * 1024 * 1024);
+      const result = await finalizeUpload(req, res, folder, req.uploadTicket.m || 50 * 1024 * 1024);
       fs.rmSync(chunkDir, { recursive: true, force: true });
+      return result;
+    })();
+    processingUploads.set(req.uploadTicket.j, processing);
+    try {
+      const result = await processing;
+      if (result) {
+        completedUploads.set(req.uploadTicket.j, result);
+        setTimeout(() => completedUploads.delete(req.uploadTicket.j), 10 * 60 * 1000);
+      }
     } catch (assemblyError) {
       console.error('[UPLOAD] Erro ao montar partes:', assemblyError);
       if (!res.headersSent) res.status(500).json({ error: 'Erro ao montar upload' });
+    } finally {
+      processingUploads.delete(req.uploadTicket.j);
     }
   });
 }
@@ -176,6 +206,7 @@ async function finalizeUpload(req, res, folder, limit) {
     const masterPath = path.join(config.state.storeFolder, fileHash);
     const relativePath = (folder ? folder + '/' : '') + req.file.filename;
     const targetPath = path.join(config.state.uploadFolder, relativePath);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
 
     if (!fs.existsSync(masterPath)) {
       fs.renameSync(tempFilePath, masterPath);
@@ -196,9 +227,13 @@ async function finalizeUpload(req, res, folder, limit) {
     const token = auth.generatePermanentToken(relativePath);
     const fileUrl = `${getPublicBaseUrl(req)}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
 
-    res.json({ message: 'Upload bem-sucedido', url: fileUrl, duplicate: fs.existsSync(masterPath) });
+    const result = { message: 'Upload bem-sucedido', url: fileUrl, duplicate: fs.existsSync(masterPath) };
+    res.json(result);
+    return result;
   } catch (err) {
-    res.status(500).json({ error: 'Erro ao processar upload' });
+  console.error('[UPLOAD] Erro ao finalizar upload:', err);
+  res.status(500).json({ error: 'Erro ao processar upload' });
+    return null;
   }
 }
 
@@ -223,6 +258,9 @@ router.post('/upload-direct', auth.uploadTicketMiddleware, function(req, res, ne
   if (req.query.chunked === '1') return chunkUpload(req, res, next);
   directUpload(req, res, next);
 }, function(req, res) {
+  if (!auth.consumeTicket(req.uploadTicket)) {
+    return res.status(409).json({ error: 'Ticket de upload já utilizado' });
+  }
   const folder = sanitizeFolder(req.uploadTicket.f);
   finalizeUpload(req, res, folder, req.uploadTicket.m || 50 * 1024 * 1024);
 });
