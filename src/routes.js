@@ -8,6 +8,10 @@ const services = require('./services');
 
 const router = express.Router();
 
+function getPublicBaseUrl(req) {
+  return (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+}
+
 function sanitizeFolder(folder) {
   return (folder || '').replace(/[^a-zA-Z0-9-_ /.]/g, '').replace(/\.\./g, '');
 }
@@ -96,7 +100,7 @@ async function finalizeUpload(req, res, folder, limit) {
     config.saveHashes();
 
     const token = auth.generatePermanentToken(relativePath);
-    const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
+    const fileUrl = `${getPublicBaseUrl(req)}/files/${relativePath.replace(/\\/g, '/')}?token=${token}`;
 
     res.json({ message: 'Upload bem-sucedido', url: fileUrl, duplicate: fs.existsSync(masterPath) });
   } catch (err) {
@@ -138,7 +142,7 @@ router.get('/list', auth.apiKeyMiddleware, function(req, res) {
         const stats = fs.statSync(fullPath);
         const relativePath = path.relative(config.state.uploadFolder, fullPath).replace(/\\/g, '/');
         const token = auth.generatePermanentToken(relativePath);
-        const fileUrl = `${req.protocol}://${req.get('host')}/files/${relativePath}?token=${token}`;
+        const fileUrl = `${getPublicBaseUrl(req)}/files/${relativePath}?token=${token}`;
         
         arrayOfFiles.push({ name: file, path: relativePath, url: fileUrl, size: stats.size, mtime: stats.mtime, ino: stats.ino });
       }
