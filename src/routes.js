@@ -7,6 +7,7 @@ const auth = require('./auth');
 const services = require('./services');
 
 const router = express.Router();
+const CHUNK_BYTES = 90 * 1024 * 1024;
 
 function getPublicBaseUrl(req) {
   return (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
@@ -42,19 +43,32 @@ const storage = multer.diskStorage({
   }
 });
 
+const chunkStorage = multer.diskStorage({
+  destination: function(req, file, cb) {
+    const dir = path.join(config.state.storeFolder, '.chunks', req.uploadTicket.j);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: function(req, file, cb) {
+    cb(null, `${req.query.index}.part`);
+  }
+});
+
+function ticketFileFilter(req, file, cb) {
+  const prefixes = Array.isArray(req.uploadTicket.t) ? req.uploadTicket.t : [];
+  const typeOk = prefixes.length === 0 || prefixes.some(p => (file.mimetype || '').startsWith(p));
+  if (isAllowedFile(file) && typeOk) return cb(null, true);
+  console.log(`[UPLOAD] Bloqueado (ticket): ${file.originalname} (${file.mimetype})`);
+  cb(new Error('Tipo não permitido'));
+}
+
 // Upload direto: limite e tipos vêm do ticket assinado
 function directUpload(req, res, next) {
   const ticket = req.uploadTicket;
   const handler = multer({
     storage: storage,
     limits: { fileSize: ticket.m || 50 * 1024 * 1024, files: 1 },
-    fileFilter: function(req, file, cb) {
-      const prefixes = Array.isArray(ticket.t) ? ticket.t : [];
-      const typeOk = prefixes.length === 0 || prefixes.some(p => (file.mimetype || '').startsWith(p));
-      if (isAllowedFile(file) && typeOk) return cb(null, true);
-      console.log(`[UPLOAD] Bloqueado (ticket): ${file.originalname} (${file.mimetype})`);
-      cb(new Error('Tipo não permitido'));
-    }
+    fileFilter: ticketFileFilter
   }).single('file');
 
   handler(req, res, function(err) {
@@ -62,7 +76,85 @@ function directUpload(req, res, next) {
       const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
       return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Arquivo muito grande' : err.message });
     }
+
     next();
+  });
+}
+
+function chunkUpload(req, res) {
+  const index = Number(req.query.index);
+  const total = Number(req.query.total);
+  if (!Number.isInteger(index) || !Number.isInteger(total) || total < 1 || index < 0 || index >= total) {
+    return res.status(400).json({ error: 'Parte de upload inválida' });
+  }
+  const expectedSize = Number(req.uploadTicket.s);
+  if (total > 10000 || (Number.isFinite(expectedSize) && total > Math.ceil(expectedSize / CHUNK_BYTES))) {
+    return res.status(400).json({ error: 'Quantidade de partes inválida' });
+  }
+
+  const handler = multer({
+    storage: chunkStorage,
+    limits: { fileSize: CHUNK_BYTES, files: 1 },
+    fileFilter: ticketFileFilter
+  }).single('file');
+
+  handler(req, res, async function(err) {
+    if (err) {
+      const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE'
+        ? `Cada parte deve ter no máximo ${CHUNK_BYTES / (1024 * 1024)}MB`
+        : err.message });
+    }
+    if (!req.file) return res.status(400).json({ error: 'Nenhuma parte enviada' });
+
+    const chunkDir = path.dirname(req.file.path);
+    const parts = Array.from({ length: total }, (_, partIndex) =>
+      path.join(chunkDir, `${partIndex}.part`)
+    );
+    const received = parts.filter(part => fs.existsSync(part));
+    if (received.length !== total) {
+      return res.json({ received: true, index, complete: false });
+    }
+
+    if (Number.isFinite(expectedSize)) {
+      const receivedSize = received.reduce((sum, part) => sum + fs.statSync(part).size, 0);
+      if (receivedSize !== expectedSize) {
+        return res.status(400).json({ error: 'Tamanho total do upload não confere' });
+      }
+    }
+
+    const assembledPath = path.join(chunkDir, 'assembled.upload');
+    try {
+      const output = fs.createWriteStream(assembledPath);
+      output.on('error', error => console.error('[UPLOAD] Erro ao gravar upload montado:', error));
+      for (const part of parts) {
+        await new Promise((resolve, reject) => {
+          const input = fs.createReadStream(part);
+          input.on('error', reject);
+          input.on('end', resolve);
+          input.pipe(output, { end: false });
+        });
+      }
+      await new Promise((resolve, reject) => {
+        output.once('error', reject);
+        output.end(resolve);
+      });
+
+      if (!auth.consumeTicket(req.uploadTicket)) {
+        return res.status(409).json({ error: 'Ticket de upload já utilizado' });
+      }
+      req.file = {
+        path: assembledPath,
+        size: fs.statSync(assembledPath).size,
+        filename: `${Date.now()}-${req.uploadTicket.n}`
+      };
+      const folder = sanitizeFolder(req.uploadTicket.f);
+      await finalizeUpload(req, res, folder, req.uploadTicket.m || 50 * 1024 * 1024);
+      fs.rmSync(chunkDir, { recursive: true, force: true });
+    } catch (assemblyError) {
+      console.error('[UPLOAD] Erro ao montar partes:', assemblyError);
+      if (!res.headersSent) res.status(500).json({ error: 'Erro ao montar upload' });
+    }
   });
 }
 
@@ -109,7 +201,7 @@ async function finalizeUpload(req, res, folder, limit) {
 }
 
 router.post('/upload-ticket', auth.apiKeyMiddleware, function(req, res) {
-  const { folder, name, type } = req.body || {};
+  const { folder, name, type, size } = req.body || {};
   const filename = path.basename(String(name || ''));
   const mime = String(type || 'application/octet-stream');
   if (!filename || !folder) return res.status(400).json({ error: 'folder e name são obrigatórios' });
@@ -118,13 +210,17 @@ router.post('/upload-ticket', auth.apiKeyMiddleware, function(req, res) {
     folder: sanitizeFolder(folder),
     filename,
     maxBytes: 1024 * 1024 * 1024,
+    size,
     mimePrefixes: mime === 'application/octet-stream' ? [] : [`${mime.split('/')[0]}/`, 'application/octet-stream']
   });
   res.json({ uploadUrl: `/upload-direct?ticket=${encodeURIComponent(ticket)}` });
 });
 
 // Upload direto do navegador, autenticado por ticket emitido pelo backend (sem expor a API_KEY)
-router.post('/upload-direct', auth.uploadTicketMiddleware, directUpload, function(req, res) {
+router.post('/upload-direct', auth.uploadTicketMiddleware, function(req, res, next) {
+  if (req.query.chunked === '1') return chunkUpload(req, res, next);
+  directUpload(req, res, next);
+}, function(req, res) {
   const folder = sanitizeFolder(req.uploadTicket.f);
   finalizeUpload(req, res, folder, req.uploadTicket.m || 50 * 1024 * 1024);
 });

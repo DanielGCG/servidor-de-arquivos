@@ -442,22 +442,33 @@
             const ticketResponse = await fetch('/upload-ticket', {
                 method: 'POST',
                 headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ folder: folderInput, name: file.name, type: file.type })
+                body: JSON.stringify({ folder: folderInput, name: file.name, type: file.type, size: file.size })
             });
             const ticket = await ticketResponse.json();
             if (!ticketResponse.ok) throw new Error(ticket.error || 'Não foi possível criar o ticket');
 
-            const formData = new FormData();
-            formData.append('file', file);
-            const response = await fetch(ticket.uploadUrl, { method: 'POST', body: formData });
-
-            const result = await response.json();
-            if (response.ok) {
+            const chunkSize = 90 * 1024 * 1024;
+            const total = Math.ceil(file.size / chunkSize);
+            let result = null;
+            for (let index = 0; index < total; index++) {
+                const start = index * chunkSize;
+                const chunk = file.slice(start, Math.min(start + chunkSize, file.size));
+                const formData = new FormData();
+                formData.append('file', chunk);
+                const response = await fetch(`${ticket.uploadUrl}&chunked=1&index=${index}&total=${total}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                result = await response.json();
+                if (!response.ok) throw new Error(result.error || 'Falha no upload');
+                status.innerText = `Enviando... ${Math.round(((index + 1) / total) * 100)}%`;
+            }
+            if (result && result.url) {
                 status.innerText = 'Upload concluído!';
                 status.style.color = 'green';
                 loadFiles();
             } else {
-                status.innerText = 'Erro: ' + result.error;
+                status.innerText = 'Erro: ' + (result && result.error ? result.error : 'Falha no upload');
                 status.style.color = 'red';
             }
         } catch (err) {

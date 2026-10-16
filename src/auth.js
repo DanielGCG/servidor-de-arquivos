@@ -41,7 +41,7 @@ function apiKeyMiddleware(req, res, next) {
 // ---- Tickets de upload direto ----
 // Emitidos pelo backend (Teco) após autenticar/validar o usuário e verificados aqui.
 // Formato: base64url(payload JSON) + '.' + HMAC-SHA256(payload)
-// Payload: { f: pasta, n: nome do arquivo, m: tamanho máximo (bytes), t: prefixos de mime permitidos, e: expiração (ms epoch), j: nonce }
+// Payload: { f: pasta, n: nome do arquivo, m: tamanho máximo, s: tamanho esperado, t: prefixos de mime, e: expiração, j: nonce }
 const usedTicketNonces = new Map(); // nonce -> exp
 
 function signTicketPayload(b64) {
@@ -84,7 +84,8 @@ function verifyUploadTicket(ticket) {
   return payload;
 }
 
-// Marca o ticket como usado (uso único). Retorna false se já foi consumido.
+// Marca o ticket como usado (uso único). Uploads em partes consomem o ticket
+// somente quando todas as partes foram recebidas.
 function consumeTicket(payload) {
   const now = Date.now();
   for (const [nonce, exp] of usedTicketNonces) {
@@ -101,7 +102,7 @@ function uploadTicketMiddleware(req, res, next) {
     console.log(`[AUTH] Ticket de upload inválido/expirado: ${req.originalUrl.split('?')[0]}`);
     return res.status(401).json({ error: 'Ticket de upload inválido ou expirado' });
   }
-  if (!consumeTicket(payload)) {
+  if (req.query.chunked !== '1' && !consumeTicket(payload)) {
     return res.status(401).json({ error: 'Ticket de upload já utilizado' });
   }
   req.uploadTicket = payload;
@@ -113,6 +114,7 @@ module.exports = {
   verifyPermanentToken,
   apiKeyMiddleware,
   verifyUploadTicket,
+  consumeTicket,
   uploadTicketMiddleware,
   createUploadTicket
 };
