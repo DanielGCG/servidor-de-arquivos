@@ -7,7 +7,8 @@ const auth = require('./auth');
 const services = require('./services');
 
 const router = express.Router();
-const CHUNK_BYTES = 80 * 1024 * 1024;
+const CHUNK_BYTES = 64 * 1024 * 1024;
+const MIN_CHUNK_BYTES = 1024 * 1024;
 
 function getPublicBaseUrl(req) {
   return (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
@@ -88,7 +89,7 @@ function chunkUpload(req, res) {
     return res.status(400).json({ error: 'Parte de upload inválida' });
   }
   const expectedSize = Number(req.uploadTicket.s);
-  if (total > 10000 || (Number.isFinite(expectedSize) && total > Math.ceil(expectedSize / CHUNK_BYTES))) {
+  if (total > 10000 || (Number.isFinite(expectedSize) && total > Math.ceil(expectedSize / MIN_CHUNK_BYTES))) {
     return res.status(400).json({ error: 'Quantidade de partes inválida' });
   }
 
@@ -102,7 +103,7 @@ function chunkUpload(req, res) {
     if (err) {
       const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
       return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE'
-        ? `Cada parte deve ter no máximo ${CHUNK_BYTES / (1024 * 1024)}MB`
+        ? 'Não foi possível enviar esta parte. Tente novamente.'
         : err.message });
     }
     if (!req.file) return res.status(400).json({ error: 'Nenhuma parte enviada' });
