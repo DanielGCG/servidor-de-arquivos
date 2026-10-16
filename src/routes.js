@@ -7,7 +7,7 @@ const auth = require('./auth');
 const services = require('./services');
 
 const router = express.Router();
-const CHUNK_BYTES = 90 * 1024 * 1024;
+const CHUNK_BYTES = 80 * 1024 * 1024;
 
 function getPublicBaseUrl(req) {
   return (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
@@ -125,6 +125,7 @@ function chunkUpload(req, res) {
 
     const assembledPath = path.join(chunkDir, 'assembled.upload');
     try {
+      if (fs.existsSync(assembledPath)) fs.unlinkSync(assembledPath);
       const output = fs.createWriteStream(assembledPath);
       output.on('error', error => console.error('[UPLOAD] Erro ao gravar upload montado:', error));
       for (const part of parts) {
